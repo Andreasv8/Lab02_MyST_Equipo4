@@ -1,20 +1,16 @@
-"""Estrategia de lab_02: entry rule, exit rule y sizing segun SPEC.md.
+"""Estrategia de lab_02: entry rule, exit rule, sizing y maquina de estados segun SPEC.md.
 
-Reutiliza los indicadores de data/indicator_analysis.py (calculados a mano
-con pandas/numpy, sin librerias externas).
+Los indicadores viven en src/indicators.py (calculados a mano con
+pandas/numpy, sin librerias externas).
 """
 
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from data.indicator_analysis import atr, mfi, roc, rsi, sma  # noqa: E402
+from src.indicators import atr, mfi, roc, rsi, sma
 
 COMMISSION_RATE = 0.001
 SLIPPAGE_RATE = 0.0005
@@ -49,13 +45,12 @@ class Position:
     entry_bar: int
 
 
-def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
-    """Calcula la señal de entrada (SPEC.md, seccion 3).
+def compute_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcula todo el pipeline de la entry rule (SPEC.md, seccion 3).
 
-    Normaliza RSI(14), MFI(14) y ROC(10) a [-1, 1], pondera con pesos
-    adaptativos segun el regimen de volatilidad de ATR(14) (comparado contra
-    su media historica hasta la barra actual, sin ver el futuro), aplica un
-    filtro de consenso de signos y un filtro direccional de SMA(50).
+    indicadores -> normalizacion -> pesos adaptativos por ATR -> score Z_t
+    -> filtro de consenso -> filtro de SMA(50) -> señal. Se regresan todas
+    las columnas intermedias para poder auditarlas (prueba de truncamiento).
 
     Parametros
     ----------
@@ -64,8 +59,10 @@ def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
 
     Regresa
     -------
-    pd.Series
-        Señal por barra: 1 (long), -1 (short) o 0 (flat).
+    pd.DataFrame
+        Columnas: sma_50, rsi_14, mfi_14, roc_10, atr_14, rsi_norm, mfi_norm,
+        roc_norm, atr_mean, w_rsi, w_mfi, w_roc, z_score, consensus, signal.
+        signal es 1 (long), -1 (short) o 0 (flat).
     """
     close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
 
@@ -84,9 +81,9 @@ def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
     atr_mean = atr_14.expanding(min_periods=1).mean()
     high_vol = atr_14 > atr_mean
 
-    w_rsi = np.where(high_vol, 0.25, 0.45)
-    w_mfi = np.where(high_vol, 0.50, 0.25)
-    w_roc = np.where(high_vol, 0.25, 0.30)
+    w_rsi = pd.Series(np.where(high_vol, 0.25, 0.45), index=df.index)
+    w_mfi = pd.Series(np.where(high_vol, 0.50, 0.25), index=df.index)
+    w_roc = pd.Series(np.where(high_vol, 0.25, 0.30), index=df.index)
 
     z_score = w_rsi * rsi_norm + w_mfi * mfi_norm + w_roc * roc_norm
 
@@ -101,7 +98,39 @@ def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
     signal.loc[entry_condition & (close > sma_50)] = 1
     signal.loc[entry_condition & (close < sma_50)] = -1
 
-    return signal
+    return pd.DataFrame({
+        "sma_50": sma_50,
+        "rsi_14": rsi_14,
+        "mfi_14": mfi_14,
+        "roc_10": roc_10,
+        "atr_14": atr_14,
+        "rsi_norm": rsi_norm,
+        "mfi_norm": mfi_norm,
+        "roc_norm": roc_norm,
+        "atr_mean": atr_mean,
+        "w_rsi": w_rsi,
+        "w_mfi": w_mfi,
+        "w_roc": w_roc,
+        "z_score": z_score,
+        "consensus": consensus,
+        "signal": signal,
+    })
+
+
+def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
+    """Señal de entrada por barra (SPEC.md, seccion 3).
+
+    Parametros
+    ----------
+    df : pd.DataFrame
+        Debe incluir columnas "Close", "High", "Low", "Volume".
+
+    Regresa
+    -------
+    pd.Series
+        Señal por barra: 1 (long), -1 (short) o 0 (flat).
+    """
+    return compute_features(df)["signal"]
 
 
 def compute_sizing(capital: float, atr_value: float, rho: float = 0.01) -> int:
@@ -171,6 +200,40 @@ def resolve_exit(position: Position, bar_high: float, bar_low: float, bar_close:
     return False, None, None
 
 
+def resolve_open_gap(position: Position, bar_open: float) -> tuple[bool, Optional[str], Optional[float]]:
+    """Revisa si el open de la barra ya cruzo el SL o el TP (gap).
+
+    Si el precio abre mas alla del stop (o del target), la orden no puede
+    llenarse al nivel del SL/TP: se llena al open. Es la ejecucion realista
+    y evita el sesgo optimista de llenar al SL en un gap (SPEC.md, seccion 7).
+
+    Parametros
+    ----------
+    position : Position
+        Posicion abierta a evaluar.
+    bar_open : float
+        Precio de apertura de la barra actual.
+
+    Regresa
+    -------
+    tuple[bool, str | None, float | None]
+        (se_cierra, motivo, precio_de_salida). motivo es "stop_loss" o
+        "take_profit"; el precio de salida es el open.
+    """
+    if position.side == "long":
+        hit_sl = bar_open <= position.stop_loss
+        hit_tp = bar_open >= position.take_profit
+    else:
+        hit_sl = bar_open >= position.stop_loss
+        hit_tp = bar_open <= position.take_profit
+
+    if hit_sl:
+        return True, "stop_loss", bar_open
+    if hit_tp:
+        return True, "take_profit", bar_open
+    return False, None, None
+
+
 def _adjust_entry_price(raw_price: float, side: str) -> float:
     """Ajusta el precio de entrada por comision y slippage (SPEC.md, seccion 6).
 
@@ -196,9 +259,17 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
                   sl_mult: float = 2.0, tp_mult: float = 3.0, max_holding: int = 10) -> list[dict]:
     """Maquina de estados de la estrategia completa (entry + exit + sizing).
 
-    Mantiene como maximo una posicion abierta a la vez. La señal calculada al
-    cierre de la barra t se ejecuta al open de la barra t+1; una señal
-    opuesta a la posicion abierta la cierra e inmediatamente abre la nueva.
+    Mantiene como maximo una posicion abierta a la vez. Cada barra t se
+    procesa en orden cronologico (SPEC.md, seccion 7):
+
+    1. Open: si el open ya cruzo el SL/TP (gap), se cierra al open.
+    2. Open: si la señal de t-1 es opuesta a la posicion, se cierra al open.
+    3. Open: si no hay posicion y la señal de t-1 es != 0, se abre al open.
+    4. Intrabar: SL/TP con el High/Low de t (tie -> SL).
+    5. Close: salida por holding maximo al cierre de t.
+
+    Como las entradas solo ocurren en el open, una posicion cerrada en los
+    pasos 4 o 5 no puede reemplazarse hasta el open de t+1.
 
     El precio de entrada/salida efectivo incluye comision (0.1%) y slippage
     (0.05%); el SL y el TP se calculan sobre el precio crudo (sin costos).
@@ -216,25 +287,25 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
     -------
     list[dict]
         Un registro por operacion cerrada, con entry_bar, exit_bar, side,
-        entry_price, exit_price, shares, exit_reason y pnl. entry_price y
-        exit_price ya incluyen el ajuste por costos.
+        entry_price, exit_price, shares, exit_reason, exit_phase ("open",
+        "intrabar" o "close") y pnl. entry_price y exit_price ya incluyen el
+        ajuste por costos. Toda entrada ocurre en el open de entry_bar.
     """
-    signal = compute_entry_signal(df)
-    atr_14 = atr(df["High"], df["Low"], df["Close"], 14)
+    features = compute_features(df)
+    sig = features["signal"].to_numpy()
+    atr_vals = features["atr_14"].to_numpy()
 
     opens = df["Open"].to_numpy()
     highs = df["High"].to_numpy()
     lows = df["Low"].to_numpy()
     closes = df["Close"].to_numpy()
-    sig = signal.to_numpy()
-    atr_vals = atr_14.to_numpy()
 
     trades: list[dict] = []
     position: Optional[Position] = None
     equity = capital
     n = len(df)
 
-    def _close(position: Position, exit_bar: int, raw_exit_price: float, reason: str) -> float:
+    def _close(position: Position, exit_bar: int, raw_exit_price: float, reason: str, phase: str) -> float:
         exit_price = _adjust_exit_price(raw_exit_price, position.side)
         if position.side == "long":
             pnl = position.shares * (exit_price - position.entry_price)
@@ -249,25 +320,29 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
             "exit_price": exit_price,
             "shares": position.shares,
             "exit_reason": reason,
+            "exit_phase": phase,
             "pnl": pnl,
         })
         return pnl
 
     for t in range(1, n):
+        # 1. Gap en el open que ya cruzo el SL o el TP.
         if position is not None:
-            closed, reason, raw_exit_price = resolve_exit(position, highs[t], lows[t], closes[t], t, max_holding)
+            closed, reason, raw_exit_price = resolve_open_gap(position, opens[t])
             if closed:
-                equity += _close(position, t, raw_exit_price, reason)
+                equity += _close(position, t, raw_exit_price, reason, "open")
                 position = None
 
         desired_side = int(sig[t - 1])
 
+        # 2. Señal opuesta: se cierra al open.
         if position is not None and desired_side != 0:
             current_side = 1 if position.side == "long" else -1
             if desired_side != current_side:
-                equity += _close(position, t, opens[t], "opposite_signal")
+                equity += _close(position, t, opens[t], "opposite_signal", "open")
                 position = None
 
+        # 3. Entrada al open con la señal y el ATR de la barra anterior.
         if position is None and desired_side != 0 and not np.isnan(atr_vals[t - 1]):
             raw_entry_price = opens[t]
             atr_at_entry = atr_vals[t - 1]
@@ -275,8 +350,6 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
 
             if shares > 0:
                 side = "long" if desired_side == 1 else "short"
-                entry_price = _adjust_entry_price(raw_entry_price, side)
-
                 if side == "long":
                     stop_loss = raw_entry_price - sl_mult * atr_at_entry
                     take_profit = raw_entry_price + tp_mult * atr_at_entry
@@ -287,18 +360,19 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
                 position = Position(
                     side=side,
                     shares=shares,
-                    entry_price=entry_price,
+                    entry_price=_adjust_entry_price(raw_entry_price, side),
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     entry_bar=t,
                 )
 
-                # El SL/TP puede tocarse en la misma barra en la que se abre
-                # la posicion; se revisa de inmediato con el H/L de esa barra.
-                closed, reason, raw_exit_price = resolve_exit(position, highs[t], lows[t], closes[t], t, max_holding)
-                if closed:
-                    equity += _close(position, t, raw_exit_price, reason)
-                    position = None
+        # 4 y 5. SL/TP intrabar (incluida la barra de entrada) y holding maximo al cierre.
+        if position is not None:
+            closed, reason, raw_exit_price = resolve_exit(position, highs[t], lows[t], closes[t], t, max_holding)
+            if closed:
+                phase = "close" if reason == "max_holding" else "intrabar"
+                equity += _close(position, t, raw_exit_price, reason, phase)
+                position = None
 
     return trades
 

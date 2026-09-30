@@ -6,12 +6,14 @@ Hereda las convenciones globales del CLAUDE.md de la raiz del repo.
 
 # Decisiones tomadas
 
-- Ticker: NVDA, datos diarios (1d) de 2024-01-01 a 2026-09-15.
+- Ticker: NVDA, datos diarios (1d), 5 años: 2021-09-15 a 2026-09-15
+  (el profesor pidió 5 años para datos diarios). Split train/test/validation
+  en `src/splits.py`.
 - Fuente: yfinance, descargado con `data/download_data.py`. Los notebooks
   NO llaman a yfinance directo; cargan `data/NVDA_daily.csv`.
-- La logica de estrategia vive en `src/strategy.py`; el notebook solo importa,
-  ejecuta y presenta resultados.
-- Ver `SPEC.md` para el detalle de la actividad (pendiente de completar).
+- Los indicadores viven en `src/indicators.py`; la logica de estrategia en
+  `src/strategy.py`. El notebook solo importa, ejecuta y presenta resultados.
+- Ver `SPEC.md` para la especificacion completa de la estrategia.
 
 ---
 
@@ -23,9 +25,13 @@ lab_02/
 ├── SPEC.md
 ├── data/
 │   ├── download_data.py
+│   ├── indicator_analysis.py   <-- correlacion de indicadores (solo train)
+│   ├── indicator_corr.png
 │   └── NVDA_daily.csv
 ├── src/
 │   ├── __init__.py
+│   ├── indicators.py
+│   ├── splits.py
 │   └── strategy.py
 └── tests/
     └── test_strategy.py

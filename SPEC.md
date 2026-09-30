@@ -2,16 +2,18 @@
 
 ## 1. Universe and frequency
 
-Activo: NVDA (NVIDIA Corp), barras diarias (1d), datos de yfinance. Rango: 2024-01-01 a 2026-09-15.
+Activo: NVDA (NVIDIA Corp), barras diarias (1d), datos de yfinance. Rango: 5 años, 2021-09-15 a 2026-09-15 (~1,255 barras).
 
-División temporal por chunks (sin aleatorizar):
-- Train: 2024-01-01 a 2024-12-31
-- Test: 2025-01-01 a 2025-06-30
-- Validation: 2025-07-01 a 2026-09-15
+División temporal por chunks contiguos (sin aleatorizar), 60/20/20 aprox.:
+- Train: 2021-09-15 a 2024-09-14 (3 años)
+- Test: 2024-09-15 a 2025-09-14 (1 año)
+- Validation: 2025-09-15 a 2026-09-15 (1 año)
+
+Las fechas viven en `src/splits.py`. Los indicadores se calculan sobre la serie completa (son causales) y después se recortan por periodo, para no perder el warm-up de 50 barras al inicio de test y validation.
 
 ## 2. Features
 
-Indicadores seleccionados a partir de una matriz de correlación de 12 candidatos, descartando pares con correlación > 0.85.
+Indicadores seleccionados a partir de una matriz de correlación de 12 candidatos (`data/indicator_analysis.py`), descartando pares con correlación > 0.85. La matriz se calcula **solo sobre train**, para que la selección no vea test ni validation.
 
 | Indicador | Tipo | Familia | Uso |
 |-----------|------|---------|-----|
@@ -60,6 +62,7 @@ Señal final:
 - Holding máximo: 10 barras. Si no toca SL ni TP, cierra al cierre de la barra 10
 - La barra de entrada cuenta como barra 1, por lo que la posición se cierra al cierre de la barra 10 desde la entrada (entry_bar + 9).
 - Tie intrabar (High ≥ TP y Low ≤ SL en la misma barra): se ejecuta SL (conservador)
+- Gap: si el open ya cruzó el SL (o el TP), la salida se llena al open, no al nivel del SL/TP
 
 ## 5. Sizing
 
@@ -81,10 +84,16 @@ Fuente: comisiones estándar de brokers retail (Interactive Brokers, similar). S
 
 ## 7. Conventions
 
-- Señal al cierre de barra t, se ejecuta al open de barra t+1
+- Señal al cierre de barra t, se ejecuta al open de barra t+1. El ATR usado para SL/TP y sizing también es el de t.
+- Orden de eventos dentro de cada barra:
+  1. Open: salida por gap que cruzó SL/TP (se llena al open).
+  2. Open: salida por señal opuesta (al open).
+  3. Open: entrada nueva si no hay posición.
+  4. Intrabar: SL/TP con High/Low (tie → SL).
+  5. Close: salida por holding máximo.
 - Ties intrabar: SL tiene prioridad sobre TP
-- Una sola posición abierta a la vez
-- Transición directa long a short (o viceversa) permitida en la misma barra
+- Una sola posición abierta a la vez. Como las entradas solo ocurren en el open, una posición cerrada intrabar o al cierre de t no se reemplaza hasta el open de t+1.
+- Transición directa long a short (o viceversa) permitida en la misma barra, solo por señal opuesta (cierre y apertura al mismo open)
 
 ## Break-even win rate
 

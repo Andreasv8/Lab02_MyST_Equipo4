@@ -12,8 +12,10 @@ import yfinance as yf
 DATA_DIR = Path(__file__).resolve().parent
 
 TICKER = "NVDA"
-START = "2024-01-01"
-END = "2026-09-15"
+# 5 años de barras diarias. yfinance trata END como exclusivo, por eso se
+# pide hasta el 16 para incluir el 2026-09-15.
+START = "2021-09-15"
+END = "2026-09-16"
 INTERVAL = "1d"
 
 
