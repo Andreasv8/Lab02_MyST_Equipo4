@@ -8,7 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import src.strategy as strategy
-from src.strategy import TOTAL_COST_RATE, Position, compute_sizing, resolve_exit, run_backtest
+from src.strategy import TOTAL_COST_RATE, Position, compute_features, compute_sizing, resolve_exit, run_backtest
 
 # Orden cronologico de los eventos dentro de una barra (SPEC.md, seccion 7).
 PHASE_ORDER = {"open": 0, "intrabar": 1, "close": 2}
@@ -156,3 +156,19 @@ def test_max_holding_closes_on_tenth_bar(monkeypatch):
     assert trades[0]["exit_bar"] == 10
     assert trades[0]["exit_reason"] == "max_holding"
     assert trades[0]["exit_phase"] == "close"
+
+
+def test_signal_direction_agrees_with_score_and_sma():
+    """Long exige Z > 0.3 y Close > SMA(50); short exige Z < -0.3 y Close < SMA(50)."""
+    df = pd.read_csv(Path(__file__).resolve().parents[1] / "data" / "NVDA_daily.csv",
+                     index_col="Date", parse_dates=True)
+    features = compute_features(df)
+
+    longs = features[features["signal"] == 1]
+    shorts = features[features["signal"] == -1]
+
+    assert len(longs) > 0 and len(shorts) > 0
+    assert (longs["z_score"] > 0.3).all()
+    assert (df.loc[longs.index, "Close"] > longs["sma_50"]).all()
+    assert (shorts["z_score"] < -0.3).all()
+    assert (df.loc[shorts.index, "Close"] < shorts["sma_50"]).all()

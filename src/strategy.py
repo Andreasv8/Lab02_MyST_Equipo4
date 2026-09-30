@@ -92,11 +92,11 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     sign_roc = np.sign(roc_norm)
     consensus = (sign_rsi == sign_mfi) & (sign_mfi == sign_roc) & (sign_rsi != 0)
 
-    entry_condition = (z_score.abs() > 0.3) & consensus
-
+    # La direccion la da el score y SMA(50) solo la confirma: si no
+    # coinciden, la señal queda flat.
     signal = pd.Series(0, index=df.index, dtype=int)
-    signal.loc[entry_condition & (close > sma_50)] = 1
-    signal.loc[entry_condition & (close < sma_50)] = -1
+    signal.loc[(z_score > 0.3) & consensus & (close > sma_50)] = 1
+    signal.loc[(z_score < -0.3) & consensus & (close < sma_50)] = -1
 
     return pd.DataFrame({
         "sma_50": sma_50,

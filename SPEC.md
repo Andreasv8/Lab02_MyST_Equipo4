@@ -48,10 +48,10 @@ Filtro de consenso: si RSI_norm, MFI_norm y ROC_norm no comparten el mismo signo
 
 Si algún indicador normalizado es exactamente 0, se considera sin dirección y el consenso falla (señal = flat).
 
-Señal final:
-- Si |Z_t| > 0.3 y pasa consenso y Close > SMA(50): señal = +1 (long)
-- Si |Z_t| > 0.3 y pasa consenso y Close < SMA(50): señal = -1 (short)
-- Cualquier otro caso: señal = 0 (flat)
+Señal final (la dirección la da Z; SMA(50) solo confirma la tendencia):
+- Si Z_t > 0.3 y pasa consenso y Close > SMA(50): señal = +1 (long)
+- Si Z_t < −0.3 y pasa consenso y Close < SMA(50): señal = −1 (short)
+- Cualquier otro caso, incluido Z y SMA en desacuerdo: señal = 0 (flat)
 
 ## 4. Exit rule
 
