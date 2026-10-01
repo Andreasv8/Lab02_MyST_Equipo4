@@ -5,11 +5,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.regime_analysis import (
     count_transitions,
+    method_scorecard,
     regime_centroids,
     regime_runs,
     regime_shares,
@@ -61,3 +63,39 @@ def test_silhouette_nan_with_single_regime():
     """Con un solo regimen el silhouette no esta definido."""
     x = pd.DataFrame({"f": [0.0, 1.0, 2.0]})
     assert np.isnan(regime_silhouette(x, pd.Series(["a", "a", "a"])))
+
+
+def test_method_scorecard_hand_case():
+    """Un metodo, dos periodos: cambios de participacion, transiciones y consistencia de nombres."""
+    names = ["crisis", "trend", "mean_reversion"]
+    row = lambda trans, dur, sil, shares: {"transitions_per_month": trans, "mean_duration_all": dur,
+                                           "silhouette": sil,
+                                           **{f"share_{n}": v for n, v in zip(names, shares)}}
+    table = pd.DataFrame.from_dict({("m", "train"): row(1.0, 20.0, 0.3, [10, 50, 40]),
+                                    ("m", "test"): row(1.5, 14.0, 0.2, [16, 41, 43])},
+                                   orient="index").rename_axis(["method", "period"])
+    good = pd.DataFrame({"volatility": [0.7, 0.5, 0.4], "trend_r2": [0.5, 0.8, 0.2]},
+                        index=pd.MultiIndex.from_product([["m"], names], names=["method", "regime"]))
+    bad = good.copy()
+    bad.loc[("m", "trend"), "trend_r2"] = 0.1   # trend ya no es el de mayor trend_r2
+
+    card = method_scorecard(table, good, bad).loc["m"]
+
+    assert card["share_shift_pp"] == pytest.approx((6 + 9 + 3) / 3)
+    assert card["transitions_change"] == pytest.approx(0.5)
+    assert card["mean_duration_test"] == 14.0
+    assert card["names_consistent_train"]
+    assert not card["names_consistent_test"]
+
+
+def test_viterbi_lookahead_check_filtered_never_changes():
+    """Con pocas t: la etiqueta filtrada del HMM no cambia al truncar."""
+    from src.regime_analysis import viterbi_lookahead_check
+    from src.regimes import fit_regime_models
+    from src.splits import SPLITS
+
+    df = pd.read_csv(Path(__file__).resolve().parents[1] / "data" / "NVDA_daily.csv",
+                     index_col="Date", parse_dates=True).loc[:SPLITS["test"][1]]
+    check = viterbi_lookahead_check(df, fit_regime_models(df), step=150)
+    assert len(check) >= 5
+    assert check["hmm_same"].all()

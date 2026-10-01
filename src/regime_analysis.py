@@ -16,9 +16,12 @@ from src.regimes import (
     REGIME_COLUMNS,
     REGIME_NAMES,
     TRADING_DAYS,
+    RegimeModels,
     RegimeScaler,
     apply_scaler,
     hmm_expected_durations,
+    name_states,
+    regime_labels,
 )
 from src.splits import SPLITS
 
@@ -220,3 +223,88 @@ def regime_return_profile(df: pd.DataFrame, labels_df: pd.DataFrame,
                     "ann_volatility": r.std() * np.sqrt(TRADING_DAYS),
                 }
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis(["method", "period", "regime"])
+
+
+def viterbi_lookahead_check(df: pd.DataFrame, models: RegimeModels, step: int = 5) -> pd.DataFrame:
+    """Compara la etiqueta en t con la serie completa vs con df.iloc[:t+1], filtrado y Viterbi.
+
+    Si un metodo es causal, su etiqueta en t no cambia al quitar las barras
+    posteriores a t. El HMM filtrado (forward) no debe cambiar nunca; Viterbi
+    si puede cambiar porque elige la secuencia completa con backtracking
+    desde la ultima barra (look-ahead). Es el canario del notebook.
+
+    Parametros
+    ----------
+    df : pd.DataFrame
+        Precios (hasta fin de test).
+    models : RegimeModels
+        Modelos ya ajustados en train (no se reajustan).
+    step : int
+        Se revisa una t cada step barras, desde la primera con features.
+
+    Regresa
+    -------
+    pd.DataFrame
+        Indice = fecha de t; columnas hmm_same y hmm_viterbi_same (bool).
+    """
+    full = regime_labels(df, models)
+    start = df.index.get_loc(full["hmm"].first_valid_index())
+    rows = {}
+    for t in range(start, len(df), step):
+        truncated = regime_labels(df.iloc[:t + 1], models).iloc[-1]
+        rows[df.index[t]] = {col + "_same": truncated[col] == full[col].iloc[t]
+                             for col in ["hmm", "hmm_viterbi"]}
+    return pd.DataFrame.from_dict(rows, orient="index")
+
+
+def _names_consistent(centroids: pd.DataFrame) -> bool:
+    """True si name_states sobre estos centroides reproduce los nombres que ya tienen."""
+    ordered = centroids.reindex(REGIME_NAMES).reset_index(drop=True)
+    if ordered[["volatility", "trend_r2"]].isna().any().any():
+        return False
+    mapping = name_states(ordered)
+    return all(mapping[i] == name for i, name in enumerate(REGIME_NAMES))
+
+
+def method_scorecard(table: pd.DataFrame, centroids_train: pd.DataFrame,
+                     centroids_test: pd.DataFrame) -> pd.DataFrame:
+    """Criterios numericos para elegir metodo de regimen, por metodo.
+
+    - persistencia: transiciones/mes y duracion media de rachas en test
+      (menos cambios = menos costos de rotacion y regimenes utilizables).
+    - estabilidad train -> test: cambio medio absoluto de participacion por
+      regimen (puntos porcentuales) y cambio de transiciones/mes.
+    - separacion: silhouette en train y test.
+    - consistencia interna: la regla de nombres (mayor volatilidad = crisis;
+      de los otros, mayor trend_r2 = trend) sigue valiendo con los centroides
+      de train y de test.
+    La causalidad no aparece: las tres etiquetas filtradas son causales
+    (tests de truncamiento).
+
+    Parametros
+    ----------
+    table : pd.DataFrame
+        Salida de comparison_table (indice method, period).
+    centroids_train, centroids_test : pd.DataFrame
+        Salida de regime_centroids en cada periodo (indice method, regime).
+
+    Regresa
+    -------
+    pd.DataFrame
+        Una fila por metodo.
+    """
+    rows = {}
+    share_cols = [f"share_{n}" for n in REGIME_NAMES]
+    for method in table.index.get_level_values("method").unique():
+        train, test = table.loc[(method, "train")], table.loc[(method, "test")]
+        rows[method] = {
+            "transitions_per_month_test": test["transitions_per_month"],
+            "mean_duration_test": test["mean_duration_all"],
+            "share_shift_pp": (test[share_cols] - train[share_cols]).abs().mean(),
+            "transitions_change": test["transitions_per_month"] - train["transitions_per_month"],
+            "silhouette_train": train["silhouette"],
+            "silhouette_test": test["silhouette"],
+            "names_consistent_train": _names_consistent(centroids_train.loc[method]),
+            "names_consistent_test": _names_consistent(centroids_test.loc[method]),
+        }
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("method")

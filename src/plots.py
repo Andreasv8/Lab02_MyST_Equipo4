@@ -327,3 +327,39 @@ def plot_param_importances(ax: plt.Axes, importances: pd.Series, title: str) -> 
     ax.set_xlabel("Importancia relativa (fANOVA, suma 1)")
     _style(ax)
     return ax
+
+
+EQUITY_CURVE_COLORS = {"buy & hold": BENCHMARK_COLOR, "θ0": REFERENCE_COLOR,
+                       "θ*": "#1f1e1c", "θ*_régimen": STRATEGY_COLOR}
+
+
+def plot_equity_curves(ax: plt.Axes, curves: dict, split_date: pd.Timestamp) -> plt.Axes:
+    """Curvas de equity de varias estrategias en escala logaritmica, con el corte train/test.
+
+    Parametros
+    ----------
+    ax : plt.Axes
+        Ejes donde dibujar.
+    curves : dict[str, pd.Series]
+        Nombre -> equity por barra (USD).
+    split_date : pd.Timestamp
+        Primer dia de test (linea vertical).
+
+    Regresa
+    -------
+    plt.Axes
+    """
+    for name, equity in curves.items():
+        ax.plot(equity.index, equity, linewidth=2, label=name,
+                color=EQUITY_CURVE_COLORS.get(name, STRATEGY_COLOR))
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(mticker.LogLocator(base=10, subs=[1.0, 2.0, 5.0]))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
+    ax.yaxis.set_minor_locator(mticker.NullLocator())
+    _split_line(ax, split_date)
+    ax.set_title("Equity: buy & hold vs θ0, θ* y θ* por régimen (escala log)")
+    ax.set_xlabel("Fecha")
+    ax.set_ylabel("Equity (USD, escala log)")
+    ax.legend(loc="upper left", frameon=False)
+    _style(ax)
+    return ax

@@ -274,6 +274,28 @@ def run_regime_strategy(df: pd.DataFrame, models: RegimeModels, regime_thetas: d
                     max_holding=inputs["max_holding"])
 
 
+def strategy_runs(df: pd.DataFrame, models: RegimeModels, opt: OptimizationResult) -> dict:
+    """Corre buy & hold, θ0, θ* y θ*_regimen sobre df completo (hasta fin de test).
+
+    Regresa
+    -------
+    dict
+        Nombre -> (equity DataFrame, trades DataFrame, BacktestConfig para summarize).
+    """
+    base_config = BacktestConfig()
+    theta0_run = run_theta(df, THETA0)
+    star_run = run_theta(df, opt.theta_star)
+    regime_run = run_regime_strategy(df, models, opt.regime_thetas)
+    no_trades = theta0_run.trades.iloc[0:0]
+    bh_equity = buy_and_hold_equity(df, base_config.initial_cash, base_config.cost_rate)
+    return {
+        "buy & hold": (bh_equity, no_trades, base_config),
+        "θ0": (theta0_run.equity, theta0_run.trades, theta_config(THETA0)),
+        "θ*": (star_run.equity, star_run.trades, theta_config(opt.theta_star)),
+        "θ*_régimen": (regime_run.equity, regime_run.trades, base_config),
+    }
+
+
 def comparison_table(df: pd.DataFrame, models: RegimeModels, opt: OptimizationResult,
                      periods: tuple = ("train", "test")) -> pd.DataFrame:
     """Metricas de summarize en train y test: buy & hold, θ0, θ* y θ*_regimen.
@@ -288,29 +310,44 @@ def comparison_table(df: pd.DataFrame, models: RegimeModels, opt: OptimizationRe
     pd.DataFrame
         Columnas "<estrategia> <periodo>", filas = metricas de summarize.
     """
-    base_config = BacktestConfig()
-    theta0_run = run_theta(df, THETA0)
-    star_run = run_theta(df, opt.theta_star)
-    regime_run = run_regime_strategy(df, models, opt.regime_thetas)
-    no_trades = theta0_run.trades.iloc[0:0]
-    bh_equity = buy_and_hold_equity(df, base_config.initial_cash, base_config.cost_rate)
-
-    # nombre -> (equity, trades, config)
-    runs = {
-        "buy & hold": (bh_equity, no_trades, base_config),
-        "θ0": (theta0_run.equity, theta0_run.trades, theta_config(THETA0)),
-        "θ*": (star_run.equity, star_run.trades, theta_config(opt.theta_star)),
-        "θ*_régimen": (regime_run.equity, regime_run.trades, base_config),
-    }
-
     columns = {}
-    for name, (equity, trades, config) in runs.items():
+    for name, (equity, trades, config) in strategy_runs(df, models, opt).items():
         for period in periods:
             stats = summarize(equity, trades, config, *SPLITS[period])
             if name == "θ*_régimen":
                 stats[SCALAR_EXIT_METRICS] = np.nan
             columns[f"{name} {period}"] = stats
     return pd.DataFrame(columns)
+
+
+def theta_table(df: pd.DataFrame, models: RegimeModels, opt: OptimizationResult) -> pd.DataFrame:
+    """θ0, θ* y θ*_j con su J en train, numero de trades en train y si se opera.
+
+    Para θ*_j se reporta el mejor θ del estudio aunque la regla a priori lo
+    apague (operates = False). tp_mult = sl_mult · rr se agrega como columna.
+
+    Regresa
+    -------
+    pd.DataFrame
+        Una fila por θ; columnas = parametros, tp_mult, J_train, trades_train, operates.
+    """
+    df_train = get_split(df, "train")
+    labels = regime_labels(df_train, models)["hmm"]
+    rows = {}
+
+    def _row(theta: dict, allowed: Optional[pd.Series], min_trades: int, operates: bool) -> dict:
+        result = run_theta(df_train, theta, allowed)
+        return {**theta, "tp_mult": theta["sl_mult"] * theta["rr"],
+                "J_train": objective(result, min_trades), "trades_train": len(result.trades),
+                "operates": operates}
+
+    rows["θ0"] = _row(THETA0, None, MIN_TRADES, True)
+    rows["θ*"] = _row(opt.theta_star, None, MIN_TRADES, True)
+    for name in REGIME_NAMES:
+        best = opt.studies[name].best_params if name in opt.studies else opt.regime_thetas[name]
+        rows[f"θ*_{name}"] = _row(best, labels == name, MIN_TRADES_REGIME,
+                                  opt.regime_thetas[name] is not None)
+    return pd.DataFrame.from_dict(rows, orient="index")
 
 
 def convergence_curve(study: optuna.Study) -> pd.Series:

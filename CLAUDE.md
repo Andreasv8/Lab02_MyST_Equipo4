@@ -24,6 +24,7 @@ lab_02/
 ├── CLAUDE.md
 ├── SPEC.md
 ├── Act_06_backtest.ipynb  <-- entregable Act 06 (train + test; validation no se carga)
+├── Act_07_regimes.ipynb   <-- entregable Act 07: regimenes + optimizacion (train + test; validation no se carga)
 ├── data/
 │   ├── download_data.py
 │   ├── indicator_analysis.py   <-- correlacion de indicadores (solo train)

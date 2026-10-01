@@ -386,6 +386,42 @@ def fit_hmm(features_train: pd.DataFrame,
     return model, name_states(_unscale(model.means_, scaler)), choice
 
 
+def hmm_seed_scan(features_train: pd.DataFrame, scaler: RegimeScaler, seeds,
+                  covariance_type: str = "full") -> pd.DataFrame:
+    """Ajusta el HMM con cada semilla y resume log-likelihood y persistencia en train.
+
+    Sirve para documentar la seleccion de fit_hmm: EM llega a optimos locales
+    distintos segun la semilla; algunos tienen estados de ~1 barra (ruido).
+
+    Parametros
+    ----------
+    features_train : pd.DataFrame
+        Features de train.
+    scaler : RegimeScaler
+        Ajustado en train.
+    seeds : iterable de int
+        Semillas a probar.
+    covariance_type : str
+        "full" o "diag".
+
+    Regresa
+    -------
+    pd.DataFrame
+        Indice = semilla; columnas log_likelihood, a_11, a_22, a_33 (diagonal de
+        A en el orden de IDs del modelo) y min_duration = min_j 1/(1 - a_jj).
+    """
+    x_train = _valid_scaled(features_train, scaler).to_numpy()
+    rows = {}
+    for seed in seeds:
+        model = GaussianHMM(n_components=N_REGIMES, covariance_type=covariance_type,
+                            n_iter=200, random_state=seed).fit(x_train)
+        stay = np.diag(model.transmat_)
+        rows[seed] = {"log_likelihood": model.score(x_train),
+                      **{f"a_{j + 1}{j + 1}": stay[j] for j in range(N_REGIMES)},
+                      "min_duration": (1 / (1 - stay)).min()}
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("seed")
+
+
 def hmm_forward(model: GaussianHMM, x: np.ndarray) -> np.ndarray:
     """Algoritmo forward: probabilidades FILTRADAS P(s_t | x_1..x_t).
 

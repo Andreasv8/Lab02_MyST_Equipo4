@@ -24,6 +24,7 @@ from src.regimes import (
     fit_scaler,
     hmm_expected_durations,
     hmm_forward,
+    hmm_seed_scan,
     name_states,
     regime_features,
     regime_labels,
@@ -142,3 +143,12 @@ def test_canary_viterbi_has_lookahead():
                if regime_labels(DF.iloc[:t + 1], MODELS).iloc[-1]["hmm_viterbi"]
                != FULL_LABELS.iloc[t]["hmm_viterbi"]]
     assert changed
+
+
+def test_hmm_seed_scan_best_matches_final_model():
+    """El mejor log-likelihood del barrido de semillas es el del HMM elegido (opcion full)."""
+    train = get_split(FULL_FEATURES, "train")
+    scan = hmm_seed_scan(train, MODELS.scaler, seeds=range(10))
+    x_train = apply_scaler(train.dropna(), MODELS.scaler).to_numpy()
+    assert MODELS.hmm_choice == "full"
+    np.testing.assert_allclose(scan["log_likelihood"].max(), MODELS.hmm.score(x_train), rtol=1e-12)

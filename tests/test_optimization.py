@@ -114,3 +114,19 @@ def test_optimize_theta_reproducible():
     runs = [optimize_theta(DF_TRAIN, min_trades=5, n_trials=8, n_startup_trials=4) for _ in range(2)]
     assert runs[0].best_params == runs[1].best_params
     assert runs[0].best_value == runs[1].best_value
+
+
+
+def test_theta_table_hand_thetas():
+    """theta_table con θ fijos (sin Optuna): J de θ0 coincide con objective y tp = sl · rr."""
+    from src.optimization import MIN_TRADES, OptimizationResult, theta_table
+
+    regime_thetas = {"crisis": HAND_REGIME_THETAS["crisis"], "trend": THETA0, "mean_reversion": THETA0}
+    opt = OptimizationResult(theta_star=THETA0, j_star=np.nan, regime_thetas=regime_thetas,
+                             regime_j={}, studies={})
+    table = theta_table(DF, MODELS, opt)
+
+    assert list(table.index) == ["θ0", "θ*", "θ*_crisis", "θ*_trend", "θ*_mean_reversion"]
+    assert table.loc["θ0", "J_train"] == pytest.approx(objective(run_theta(DF_TRAIN, THETA0), MIN_TRADES))
+    assert table.loc["θ*_crisis", "tp_mult"] == pytest.approx(1.5 * 2.0)
+    assert table["operates"].all()
