@@ -36,6 +36,7 @@ lab_02/
 │   ├── indicators.py
 │   ├── metrics.py          <-- metricas puras (Sharpe, Sortino, DD, CAGR, turnover, ...)
 │   ├── plots.py            <-- graficas del notebook (matplotlib)
+│   ├── regimes.py          <-- features de regimen (Act 07) y scaler solo-train
 │   ├── splits.py
 │   └── strategy.py
 └── tests/
@@ -43,6 +44,7 @@ lab_02/
     ├── test_analysis.py
     ├── test_backtest.py
     ├── test_metrics.py
+    ├── test_regimes.py
     ├── test_strategy.py
     └── test_truncation.py
 ```
