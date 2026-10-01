@@ -79,7 +79,9 @@ class BacktestResult:
 
 
 def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
-             config: BacktestConfig) -> BacktestResult:
+             config: BacktestConfig, sl_mult: Optional[pd.Series] = None,
+             tp_mult: Optional[pd.Series] = None,
+             max_holding: Optional[pd.Series] = None) -> BacktestResult:
     """Simula la estrategia barra por barra con estado explicito de caja.
 
     Cada barra t se procesa en el orden de SPEC.md, seccion 7:
@@ -108,6 +110,11 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
         ATR al cierre de cada barra (NaN en warm-up). Mismo indice que df.
     config : BacktestConfig
         Parametros de sizing, salida y costos.
+    sl_mult, tp_mult, max_holding : pd.Series, opcional
+        Parametros de salida por barra (mismo indice que df), p. ej. segun
+        el regimen. Se fijan al ENTRAR con el valor de la barra de señal
+        t-1 (igual que el ATR) y la posicion los conserva hasta salir.
+        None = el escalar de config en todas las barras.
 
     Regresa
     -------
@@ -116,6 +123,18 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
     """
     if not signal.index.equals(df.index) or not atr.index.equals(df.index):
         raise ValueError("signal y atr deben tener el mismo indice que df")
+
+    def _per_bar(values: Optional[pd.Series], default: float, name: str) -> np.ndarray:
+        """Parametro por barra como arreglo; el escalar de config si values es None."""
+        if values is None:
+            return np.full(len(df), default, dtype=float)
+        if not values.index.equals(df.index):
+            raise ValueError(f"{name} debe tener el mismo indice que df")
+        return values.to_numpy(dtype=float)
+
+    sl_vals = _per_bar(sl_mult, config.sl_mult, "sl_mult")
+    tp_vals = _per_bar(tp_mult, config.tp_mult, "tp_mult")
+    holding_vals = _per_bar(max_holding, config.max_holding, "max_holding")
 
     sig = signal.to_numpy()
     atr_vals = atr.to_numpy(dtype=float)
@@ -130,20 +149,25 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
     cash = config.initial_cash
     shares = 0
     position: Optional[Position] = None
+    position_holding = config.max_holding  # holding maximo fijado al entrar
     trades: list[dict] = []
     cash_hist = np.empty(n)
     shares_hist = np.zeros(n, dtype=int)
 
     def _open(t: int, side: str, q: int, atr_at_entry: float, truncated: bool) -> tuple[Position, float, int]:
-        """Abre una posicion al open de t; regresa (posicion, delta de caja, shares con signo)."""
+        """Abre una posicion al open de t; regresa (posicion, delta de caja, shares con signo).
+
+        SL y TP usan los multiplos de la barra de señal t-1.
+        """
         raw = opens[t]
+        sl, tp = sl_vals[t - 1], tp_vals[t - 1]
         if side == "long":
-            stop_loss = raw - config.sl_mult * atr_at_entry
-            take_profit = raw + config.tp_mult * atr_at_entry
+            stop_loss = raw - sl * atr_at_entry
+            take_profit = raw + tp * atr_at_entry
             cash_delta, signed = -raw * q * (1 + c), q
         else:
-            stop_loss = raw + config.sl_mult * atr_at_entry
-            take_profit = raw - config.tp_mult * atr_at_entry
+            stop_loss = raw + sl * atr_at_entry
+            take_profit = raw - tp * atr_at_entry
             cash_delta, signed = raw * q * (1 - c), -q
 
         new_position = Position(
@@ -218,12 +242,13 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
             if q > 0:
                 side = "long" if desired_side == 1 else "short"
                 position, cash_delta, shares = _open(t, side, q, atr_vals[t - 1], truncated)
+                position_holding = int(holding_vals[t - 1])
                 cash += cash_delta
 
         # 4 y 5. SL/TP intrabar (incluida la barra de entrada) y holding maximo al cierre.
         if position is not None:
             closed, reason, raw_exit = resolve_exit(position, highs[t], lows[t], closes[t], t,
-                                                    config.max_holding)
+                                                    position_holding)
             if closed:
                 phase = "close" if reason == "max_holding" else "intrabar"
                 cash += _close(position, t, raw_exit, reason, phase)

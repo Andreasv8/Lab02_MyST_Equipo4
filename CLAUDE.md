@@ -35,6 +35,7 @@ lab_02/
 │   ├── backtest.py         <-- motor orientado a eventos (cash, shares, equity)
 │   ├── indicators.py
 │   ├── metrics.py          <-- metricas puras (Sharpe, Sortino, DD, CAGR, turnover, ...)
+│   ├── optimization.py     <-- Optuna: θ* unico y θ*_j por regimen, estrategia combinada (Act 07)
 │   ├── plots.py            <-- graficas de los notebooks (matplotlib)
 │   ├── regime_analysis.py  <-- comparacion de clasificadores de regimen (Act 07)
 │   ├── regimes.py          <-- features de regimen (Act 07), scaler y clasificadores (reglas, K-means, HMM) solo-train
@@ -45,6 +46,7 @@ lab_02/
     ├── test_analysis.py
     ├── test_backtest.py
     ├── test_metrics.py
+    ├── test_optimization.py
     ├── test_regime_analysis.py
     ├── test_regimes.py
     ├── test_strategy.py

@@ -269,3 +269,61 @@ def plot_feature_distributions(features: pd.DataFrame, labels_df: pd.DataFrame,
             _style(ax)
     fig.tight_layout()
     return fig
+
+
+STUDY_COLORS = {"global": "#1f1e1c", **REGIME_COLORS}
+
+
+def plot_convergence(ax: plt.Axes, curves: dict, n_startup: int = 150) -> plt.Axes:
+    """Convergencia de Optuna: mejor J (Calmar en train) acumulado contra el numero de trial.
+
+    Parametros
+    ----------
+    ax : plt.Axes
+        Ejes donde dibujar.
+    curves : dict[str, pd.Series]
+        Nombre del estudio ("global" o regimen) -> salida de convergence_curve.
+    n_startup : int
+        Trials aleatorios iniciales (linea vertical: ahi empieza TPE).
+
+    Regresa
+    -------
+    plt.Axes
+    """
+    for name, curve in curves.items():
+        finite = curve.replace(-np.inf, np.nan)
+        ax.step(finite.index, finite.to_numpy(), where="post", linewidth=2,
+                color=STUDY_COLORS.get(name, STRATEGY_COLOR), label=name)
+    ax.axvline(n_startup, color=REFERENCE_COLOR, linestyle="--", linewidth=1)
+    ax.annotate("fin random search / inicio TPE", xy=(n_startup, 0), xycoords=("data", "axes fraction"),
+                xytext=(4, 6), textcoords="offset points", fontsize=9, color="#3d3c39")
+    ax.set_title("Convergencia: mejor J acumulado por trial (train)")
+    ax.set_xlabel("Trial")
+    ax.set_ylabel("Mejor Calmar en train (adimensional)")
+    ax.legend(loc="lower right", frameon=False)
+    _style(ax)
+    return ax
+
+
+def plot_param_importances(ax: plt.Axes, importances: pd.Series, title: str) -> plt.Axes:
+    """Importancia relativa de cada parametro de θ en J (barras horizontales, suman 1).
+
+    Parametros
+    ----------
+    ax : plt.Axes
+        Ejes donde dibujar.
+    importances : pd.Series
+        Parametro -> importancia (salida de param_importances).
+    title : str
+        Titulo del panel (p. ej. el nombre del estudio).
+
+    Regresa
+    -------
+    plt.Axes
+    """
+    ordered = importances.sort_values()
+    ax.barh(ordered.index, ordered.to_numpy(), color=STRATEGY_COLOR)
+    ax.set_title(title)
+    ax.set_xlabel("Importancia relativa (fANOVA, suma 1)")
+    _style(ax)
+    return ax

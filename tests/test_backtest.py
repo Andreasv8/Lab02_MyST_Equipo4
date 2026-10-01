@@ -54,3 +54,32 @@ def test_golden_long_tp_then_short_tp():
 
     assert result.equity["equity"].tolist() == pytest.approx(EXPECTED_EQUITY, abs=0.01)
     assert list(zip(result.trades["side"], result.trades["exit_reason"])) == EXPECTED_TRADES
+
+
+def test_per_bar_exit_params_fixed_at_entry():
+    """sl/tp/max_holding por barra: se toman de la barra de señal (t-1) y se conservan hasta salir.
+
+    Mismo escenario golden (ATR = 2). Valores por barra:
+    tp_mult = [5, 1, 1, 1, 1], max_holding = [2, 1, 1, 1, 1], sl_mult = 2.
+
+    - t=1: long al open 100 con los valores de t=0: SL = 100 - 2·2 = 96,
+      TP = 100 + 5·2 = 110, holding 2. High 103 < 110 -> sigue abierto.
+    - t=2: High 107 < 110 y Low 101 > 96; barra 2 de 2 -> sale al cierre
+      106.5 por max_holding.
+    Si el motor usara los valores de t=1 (TP = 102 u holding 1), el long
+    saldria en t=1.
+    """
+    scenario = pd.read_csv(GOLDEN_DIR / "backtest_scenario.csv", index_col="Date", parse_dates=True)
+    df = scenario[["Open", "High", "Low", "Close"]]
+    config = BacktestConfig(initial_cash=10_000, rho=0.01, sl_mult=2, tp_mult=3, max_holding=10,
+                            cost_rate=0.001, borrow_fee_annual=0.005)
+    tp_mult = pd.Series([5, 1, 1, 1, 1], index=df.index, dtype=float)
+    max_holding = pd.Series([2, 1, 1, 1, 1], index=df.index)
+
+    result = backtest(df, scenario["signal"], scenario["atr"], config,
+                      tp_mult=tp_mult, max_holding=max_holding)
+
+    first = result.trades.iloc[0]
+    assert (first["side"], first["entry_bar"], first["exit_bar"]) == ("long", 1, 2)
+    assert first["exit_reason"] == "max_holding"
+    assert first["raw_exit_price"] == pytest.approx(106.5)

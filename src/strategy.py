@@ -89,25 +89,36 @@ def confluence_signal(roc_10: pd.Series, cmf_20: pd.Series, adx_14: pd.Series,
     return signal
 
 
-def compute_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_features(df: pd.DataFrame, roc_window: int = 10, cmf_window: int = 20,
+                     adx_window: int = 14, adx_threshold: float = ADX_THRESHOLD) -> pd.DataFrame:
     """Calcula los indicadores de la estrategia y la señal (SPEC.md, secciones 2 y 3).
+
+    Los defaults son los del SPEC (θ0). Las ventanas y el umbral se pueden
+    cambiar para la optimizacion (Act 07); el ATR queda fijo en 14 porque
+    solo define SL/TP y sizing, no la señal.
 
     Parametros
     ----------
     df : pd.DataFrame
         Debe incluir columnas "Close", "High", "Low", "Volume".
+    roc_window, cmf_window, adx_window : int
+        Ventanas de ROC, CMF y ADX.
+    adx_threshold : float
+        Umbral de ADX para considerar que hay tendencia.
 
     Regresa
     -------
     pd.DataFrame
         Columnas: roc_10, cmf_20, adx_14, atr_14, signal. signal es 1
         (long), -1 (short) o 0 (flat). El ATR solo se usa para SL/TP y sizing.
+        Los nombres conservan el sufijo del default aunque se usen otras
+        ventanas, para no romper a quienes ya leen esas columnas.
     """
     close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
 
-    roc_10 = roc(close, 10)
-    cmf_20 = chaikin_money_flow(high, low, close, volume, 20)
-    adx_14 = adx(high, low, close, 14)
+    roc_10 = roc(close, roc_window)
+    cmf_20 = chaikin_money_flow(high, low, close, volume, cmf_window)
+    adx_14 = adx(high, low, close, adx_window)
     atr_14 = atr(high, low, close, 14)
 
     return pd.DataFrame({
@@ -115,7 +126,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         "cmf_20": cmf_20,
         "adx_14": adx_14,
         "atr_14": atr_14,
-        "signal": confluence_signal(roc_10, cmf_20, adx_14),
+        "signal": confluence_signal(roc_10, cmf_20, adx_14, adx_threshold),
     })
 
 
