@@ -32,8 +32,13 @@ lab_02/
 │   ├── __init__.py
 │   ├── backtest.py         <-- motor orientado a eventos (cash, shares, equity)
 │   ├── indicators.py
+│   ├── metrics.py          <-- metricas puras (Sharpe, Sortino, DD, CAGR, turnover, ...)
 │   ├── splits.py
 │   └── strategy.py
 └── tests/
-    └── test_strategy.py
+    ├── golden/backtest_scenario.csv
+    ├── test_backtest.py
+    ├── test_metrics.py
+    ├── test_strategy.py
+    └── test_truncation.py
 ```

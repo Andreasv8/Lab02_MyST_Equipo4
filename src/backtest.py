@@ -26,6 +26,7 @@ from src.strategy import (
 TRADE_COLUMNS = [
     "entry_bar", "exit_bar", "entry_date", "exit_date", "side", "entry_price",
     "exit_price", "shares", "truncated", "exit_reason", "exit_phase", "borrow_fee", "pnl",
+    "raw_entry_price", "raw_exit_price", "entry_atr",
 ]
 
 
@@ -68,7 +69,9 @@ class BacktestResult:
         Una fila por barra (mismo indice que df) con cash, shares (con signo:
         + long, - short) y equity = cash + shares * Close, al cierre de la barra.
     trades : pd.DataFrame
-        Una fila por operacion cerrada, columnas TRADE_COLUMNS.
+        Una fila por operacion cerrada, columnas TRADE_COLUMNS. entry_price y
+        exit_price incluyen costos; raw_entry_price y raw_exit_price son los
+        precios crudos de ejecucion; entry_atr es el ATR de la barra de señal.
     """
 
     equity: pd.DataFrame
@@ -183,6 +186,10 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
             "exit_phase": phase,
             "borrow_fee": borrow_fee,
             "pnl": pnl,
+            "raw_entry_price": position.raw_entry_price,
+            "raw_exit_price": raw_exit,
+            # La entrada en entry_bar usa el ATR de la barra de señal (entry_bar - 1).
+            "entry_atr": atr_vals[position.entry_bar - 1],
         })
         return cash_delta
 
