@@ -1,13 +1,17 @@
-"""Graficas de lab_02 (matplotlib) para el notebook de la Act 06.
+"""Graficas de lab_02 (matplotlib) para los notebooks de las Act 06 y 07.
 
-Cada funcion recibe los datos ya calculados y un Axes, y solo dibuja.
+Cada funcion recibe los datos ya calculados y un Axes, y solo dibuja. Las
+graficas de varios paneles de regimenes (Act 07) crean y regresan su Figure.
 Convenciones: un eje y por grafica, estrategia en azul y buy & hold en gris,
-rejilla tenue, titulos y ejes con unidades.
+regimenes con color fijo por nombre, rejilla tenue, titulos y ejes con unidades.
 """
 
 from typing import Optional
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
 import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
@@ -15,6 +19,14 @@ import pandas as pd
 STRATEGY_COLOR = "#2a78d6"
 BENCHMARK_COLOR = "#52514e"
 REFERENCE_COLOR = "#9a9893"
+REGIME_COLORS = {"crisis": "#e34948", "trend": "#2a78d6", "mean_reversion": "#52514e"}
+WARMUP_COLOR = "#d9d8d4"
+REGIME_PANEL_TITLES = {
+    "rules": "Reglas (filtrado)",
+    "kmeans": "K-means (filtrado)",
+    "hmm": "HMM filtrado (forward)",
+    "hmm_viterbi": "HMM Viterbi (usa el futuro, solo comparacion)",
+}
 
 
 def _style(ax: plt.Axes) -> None:
@@ -140,3 +152,120 @@ def plot_cost_sensitivity(ax: plt.Axes, sensitivity: pd.DataFrame, assumed_bps: 
     ax.legend(loc="center left", frameon=False)
     _style(ax)
     return ax
+
+
+def plot_elbow(ax: plt.Axes, elbow: pd.Series, chosen_k: int = 3) -> plt.Axes:
+    """Curva del codo de K-means: inercia en train contra k, marcando el k elegido.
+
+    Parametros
+    ----------
+    ax : plt.Axes
+        Ejes donde dibujar.
+    elbow : pd.Series
+        Inercia indexada por k (salida de regimes.kmeans_elbow).
+    chosen_k : int
+        k usado en el lab (linea vertical).
+
+    Regresa
+    -------
+    plt.Axes
+    """
+    ax.plot(elbow.index, elbow.to_numpy(), color=STRATEGY_COLOR, marker="o", linewidth=2)
+    ax.axvline(chosen_k, color=REFERENCE_COLOR, linestyle="--", linewidth=1)
+    ax.annotate(f"k = {chosen_k}", xy=(chosen_k, 1), xycoords=("data", "axes fraction"),
+                xytext=(4, -12), textcoords="offset points", fontsize=9, color="#3d3c39")
+    ax.set_xticks(list(elbow.index))
+    ax.set_title("Curva del codo de K-means (train)")
+    ax.set_xlabel("Numero de clusters k")
+    ax.set_ylabel("Inercia (features escaladas)")
+    _style(ax)
+    return ax
+
+
+def _regime_line(ax: plt.Axes, close: pd.Series, labels: pd.Series) -> None:
+    """Cierre como segmentos coloreados por el regimen de la barra de llegada (warm-up en gris)."""
+    x = mdates.date2num(close.index.to_pydatetime())
+    points = np.column_stack([x, close.to_numpy()])
+    segments = np.stack([points[:-1], points[1:]], axis=1)
+    colors = [REGIME_COLORS.get(label, WARMUP_COLOR) for label in labels.iloc[1:]]
+    ax.add_collection(LineCollection(segments, colors=colors, linewidths=1.4))
+    ax.autoscale_view()
+    ax.xaxis_date()
+
+
+def plot_regime_timeline(close: pd.Series, labels_df: pd.DataFrame,
+                         split_date: pd.Timestamp) -> plt.Figure:
+    """Precio de cierre coloreado por regimen: un panel por metodo filtrado + Viterbi.
+
+    Rejilla 2x2 con eje x compartido: reglas, K-means, HMM filtrado y HMM
+    Viterbi (este ultimo usa el futuro; se muestra solo para comparar).
+
+    Parametros
+    ----------
+    close : pd.Series
+        Cierre por barra (USD).
+    labels_df : pd.DataFrame
+        Salida de regime_labels (columnas rules, kmeans, hmm, hmm_viterbi).
+    split_date : pd.Timestamp
+        Primer dia de test (linea vertical).
+
+    Regresa
+    -------
+    plt.Figure
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True, sharey=True)
+    for ax, method in zip(axes.flat, REGIME_PANEL_TITLES):
+        _regime_line(ax, close, labels_df[method])
+        _split_line(ax, split_date)
+        ax.set_title(REGIME_PANEL_TITLES[method])
+        _style(ax)
+    for ax in axes[:, 0]:
+        ax.set_ylabel("Cierre NVDA (USD)")
+    for ax in axes[1, :]:
+        ax.set_xlabel("Fecha")
+    handles = [Line2D([], [], color=c, linewidth=2.5, label=n) for n, c in REGIME_COLORS.items()]
+    handles.append(Line2D([], [], color=WARMUP_COLOR, linewidth=2.5, label="warm-up (sin features)"))
+    fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False)
+    fig.suptitle("Regimenes de NVDA por metodo (train + test)")
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    return fig
+
+
+def plot_feature_distributions(features: pd.DataFrame, labels_df: pd.DataFrame,
+                               methods: tuple = ("rules", "kmeans", "hmm")) -> plt.Figure:
+    """Boxplots de cada feature por regimen; una fila por metodo, una columna por feature.
+
+    Parametros
+    ----------
+    features : pd.DataFrame
+        Features en unidades originales (volatility, trend_r2, autocorr_1).
+    labels_df : pd.DataFrame
+        Etiquetas por metodo, mismo indice.
+    methods : tuple
+        Metodos (filas) a graficar.
+
+    Regresa
+    -------
+    plt.Figure
+    """
+    regimes = list(REGIME_COLORS)
+    units = {"volatility": "volatilidad anualizada", "trend_r2": "R^2 (0-1)",
+             "autocorr_1": "autocorrelacion lag-1"}
+    fig, axes = plt.subplots(len(methods), len(features.columns),
+                             figsize=(13, 3.2 * len(methods)), squeeze=False)
+    for i, method in enumerate(methods):
+        for j, col in enumerate(features.columns):
+            ax = axes[i, j]
+            data = [features.loc[labels_df[method] == r, col].dropna() for r in regimes]
+            box = ax.boxplot(data, patch_artist=True, widths=0.6,
+                             medianprops={"color": "white", "linewidth": 1.5},
+                             flierprops={"markersize": 2, "alpha": 0.4})
+            for patch, regime in zip(box["boxes"], regimes):
+                patch.set_facecolor(REGIME_COLORS[regime])
+                patch.set_edgecolor(REGIME_COLORS[regime])
+            ax.set_xticks(range(1, len(regimes) + 1), regimes)
+            ax.set_title(f"{REGIME_PANEL_TITLES[method]} - {col}", fontsize=10)
+            ax.set_ylabel(units.get(col, col))
+            _style(ax)
+    fig.tight_layout()
+    return fig

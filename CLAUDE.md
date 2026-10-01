@@ -35,7 +35,8 @@ lab_02/
 │   ├── backtest.py         <-- motor orientado a eventos (cash, shares, equity)
 │   ├── indicators.py
 │   ├── metrics.py          <-- metricas puras (Sharpe, Sortino, DD, CAGR, turnover, ...)
-│   ├── plots.py            <-- graficas del notebook (matplotlib)
+│   ├── plots.py            <-- graficas de los notebooks (matplotlib)
+│   ├── regime_analysis.py  <-- comparacion de clasificadores de regimen (Act 07)
 │   ├── regimes.py          <-- features de regimen (Act 07), scaler y clasificadores (reglas, K-means, HMM) solo-train
 │   ├── splits.py
 │   └── strategy.py
@@ -44,6 +45,7 @@ lab_02/
     ├── test_analysis.py
     ├── test_backtest.py
     ├── test_metrics.py
+    ├── test_regime_analysis.py
     ├── test_regimes.py
     ├── test_strategy.py
     └── test_truncation.py
