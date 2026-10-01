@@ -1,100 +1,97 @@
-# SPEC — Lab 02: Trading Strategy Skeleton
+# SPEC — Lab 02: Trading Strategy Skeleton (NVDA)
 
 ## 1. Universe and frequency
+- Activo: NVDA, barras diarias (1d), yfinance (`data/download_data.py` → `data/NVDA_daily.csv`).
+  Rango 2021-09-15 a 2026-09-15, 1,255 barras. Precios ajustados por el split 10:1 de jun-2024.
+- Split por bloques contiguos (`src/splits.py`, sin aleatorizar):
 
-Activo: NVDA (NVIDIA Corp), barras diarias (1d), datos de yfinance. Rango: 5 años, 2021-09-15 a 2026-09-15 (~1,255 barras).
+| Periodo | Fechas | Barras |
+|---|---|---|
+| Train | 2021-09-15 a 2024-09-14 | 754 |
+| Test | 2024-09-15 a 2025-09-14 | 249 |
+| Validation | 2025-09-15 a 2026-09-15 | 252 |
 
-División temporal por chunks contiguos (sin aleatorizar), 60/20/20 aprox.:
-- Train: 2021-09-15 a 2024-09-14 (3 años)
-- Test: 2024-09-15 a 2025-09-14 (1 año)
-- Validation: 2025-09-15 a 2026-09-15 (1 año)
-
-Las fechas viven en `src/splits.py`. Los indicadores se calculan sobre la serie completa (son causales) y después se recortan por periodo, para no perder el warm-up de 50 barras al inicio de test y validation.
+- Los indicadores se calculan sobre la serie completa (son causales) y luego se recortan por periodo.
+  Warm-up: ADX(14) es el último en estar disponible (2021-10-21, barra 27); el train efectivo de la
+  estrategia empieza ahí (728 barras). Test y validation no pierden barras.
+- Validation no se usa para nada (ni selección, ni ajuste, ni gráficas) hasta la evaluación final.
 
 ## 2. Features
+Selección: 17 candidatos estacionarios, correlación de Pearson **solo en train**; si |r| ≥ 0.70
+se conserva uno del par (`data/indicator_analysis.py`, `data/indicator_corr.png`).
 
-Indicadores seleccionados a partir de una matriz de correlación de 12 candidatos (`data/indicator_analysis.py`), descartando pares con correlación > 0.85. La matriz se calcula **solo sobre train**, para que la selección no vea test ni validation.
+| Indicador | Ventana | Familia | Uso |
+|---|---|---|---|
+| ROC | 10 | momentum | dirección: cambio % del precio en 10 días |
+| CMF | 20 | volumen | dirección: acumulación/distribución ponderada por volumen |
+| ADX | 14 | tendencia | filtro de fuerza (sin dirección) |
+| ATR | 14 | volatilidad | solo SL/TP y sizing; no entra en la selección ni en la señal |
 
-| Indicador | Tipo | Familia | Uso |
-|-----------|------|---------|-----|
-| SMA(50) | overlay | tendencia | filtro direccional |
-| RSI(14) | oscilador | momentum | velocidad del cambio de precio |
-| MFI(14) | oscilador | volumen-momentum | RSI ponderado por volumen |
-| ROC(10) | oscilador | momentum | cambio porcentual a 10 períodos |
-| ATR(14) | — | volatilidad | sizing, SL/TP, y régimen de pesos adaptativos (no genera señales directamente) |
+- Evidencia en train: |r| ROC–CMF = 0.54, ROC–ADX = 0.25, CMF–ADX = 0.14 → **max |r| = 0.54 < 0.70**.
+- Set anterior descartado: RSI–MFI = 0.79, RSI–ROC = 0.83, MFI–ROC = 0.74, los tres > 0.70.
+- No se usa la estrategia de referencia del curso (cruce SMA 20/50 + RSI 30/70 + MACD por mayoría).
 
-## 3. Entry rule
+## 3. Entry rule (confluencia, AND)
+Con valores al cierre de la barra t:
 
-Score ponderado adaptativo por régimen de volatilidad.
+    señal_t = +1  si ROC_t > 0  y CMF_t > 0  y ADX_t > 25
+    señal_t = −1  si ROC_t < 0  y CMF_t < 0  y ADX_t > 25
+    señal_t =  0  en cualquier otro caso (incluye NaN de warm-up y valores exactamente 0)
 
-Normalización de osciladores a [-1, 1]:
-```
-RSI_norm = (RSI - 50) / 50
-MFI_norm = (MFI - 50) / 50
-ROC_norm = clip(ROC / 10, -1, 1)
-```
-
-Pesos adaptativos según ATR:
-```
-Si ATR_t > media(ATR):  w_rsi=0.25, w_mfi=0.50, w_roc=0.25
-Si no:                  w_rsi=0.45, w_mfi=0.25, w_roc=0.30
-```
-
-media(ATR) se calcula como expanding mean hasta la barra actual (sin look-ahead).
-
-Score: Z_t = w_rsi × RSI_norm + w_mfi × MFI_norm + w_roc × ROC_norm
-
-Filtro de consenso: si RSI_norm, MFI_norm y ROC_norm no comparten el mismo signo, señal = 0 (flat).
-
-Si algún indicador normalizado es exactamente 0, se considera sin dirección y el consenso falla (señal = flat).
-
-Señal final (la dirección la da Z; SMA(50) solo confirma la tendencia):
-- Si Z_t > 0.3 y pasa consenso y Close > SMA(50): señal = +1 (long)
-- Si Z_t < −0.3 y pasa consenso y Close < SMA(50): señal = −1 (short)
-- Cualquier otro caso, incluido Z y SMA en desacuerdo: señal = 0 (flat)
+- 0 en ROC y CMF es el cambio de signo: precio arriba/abajo de hace 10 días y flujo de volumen
+  comprador/vendedor neto. ADX > 25 es el umbral de Wilder (1978) para "mercado en tendencia".
+- Los umbrales son valores estándar de la literatura; no se optimizan ni se eligieron con resultados.
 
 ## 4. Exit rule
-
-- Stop-loss: 2 × ATR(14) desde el precio de entrada
-- Take-profit: 3 × ATR(14) desde el precio de entrada
-- Risk-reward ratio: 1.5:1
-- Señal opuesta: cierra posición actual y abre en la nueva dirección
-- Holding máximo: 10 barras. Si no toca SL ni TP, cierra al cierre de la barra 10
-- La barra de entrada cuenta como barra 1, por lo que la posición se cierra al cierre de la barra 10 desde la entrada (entry_bar + 9).
-- Tie intrabar (High ≥ TP y Low ≤ SL en la misma barra): se ejecuta SL (conservador)
-- Gap: si el open ya cruzó el SL (o el TP), la salida se llena al open, no al nivel del SL/TP
+- Sobre el precio de entrada crudo P_e (open de entrada, sin costos) y ATR_t de la barra de señal:
+  long SL = P_e − 2·ATR_t, TP = P_e + 3·ATR_t; short SL = P_e + 2·ATR_t, TP = P_e − 3·ATR_t.
+  Risk-reward r = 3/2 = 1.5.
+- Señal opuesta (señal_t = −lado actual): cierra al open de t+1 y abre en la nueva dirección
+  en ese mismo open. Una señal 0 no cierra la posición.
+- Holding máximo 10 barras; la barra de entrada cuenta como 1 → cierre al Close de entry_bar + 9.
+- Tie intrabar (la barra toca SL y TP): se ejecuta SL.
+- Gap: si el open ya cruzó el SL o el TP, la salida se llena al open, no al nivel.
 
 ## 5. Sizing
+Risk parity por ATR con ρ = 1% del capital y apalancamiento máximo 1:
 
-Risk-parity por ATR. Presupuesto de riesgo: ρ = 1% del capital por trade.
-```
-Q = (ρ × V_t) / (2 × ATR_t)
-```
-Donde V_t es el capital disponible y 2×ATR es la distancia al SL.
+    Q = floor( 0.01 · V_t / (2 · ATR_t) )
+    si Q · P_e > V_t:  Q = floor( V_t / P_e )   y el trade se marca truncated = True
+    si Q ≤ 0: no se opera
 
-Q se trunca a entero (no se compran fracciones). Si Q ≤ 0, el trade se omite.
+- V_t = capital (cash) realizado al momento de la entrada; no hay margen, el tope aplica igual a
+  long y short (nocional ≤ V_t). P_e = open de t+1.
+- El tope se activa solo si ATR_t/P_e < 0.5%; en train el mínimo de ATR/Close es 2.4%, así que
+  se espera que casi nunca se active, pero la regla y el registro existen.
 
 ## 6. Costs
+Por lado (entrada y salida), como fracción del nocional:
 
-- Comisión: 0.1% por transacción (entrada y salida)
-- Slippage: 0.05% por transacción
-- Borrow fee: 0 (simetría long/short)
+| Concepto | Valor | Fuente / justificación |
+|---|---|---|
+| Comisión | 0.10% | IBKR Pro Fixed cobra $0.005/acción (máx. 1% del nocional), que a los precios reales de NVDA es < 0.01%; 0.10% es una cota conservadora y en porcentaje no depende del ajuste por split |
+| Spread + slippage | 0.05% | La mitad del spread cotizado de NVDA es ~1 centavo (< 0.01%); 0.05% deja margen para el slippage al open |
+| Borrow fee (solo shorts) | 0.50% anual | NVDA es general collateral (fácil de pedir prestado); cargo = 0.005 · nocional · días_calendario / 360 |
 
-Fuente: comisiones estándar de brokers retail (Interactive Brokers, similar). Slippage conservador para activo líquido.
+- Sin impacto de mercado: el nocional máximo es V_t ≈ $100k, frente a un volumen diario mediano
+  en train de ~463M acciones (ajustadas) ≈ $13B → < 0.001% del volumen diario.
 
 ## 7. Conventions
-
-- Señal al cierre de barra t, se ejecuta al open de barra t+1. El ATR usado para SL/TP y sizing también es el de t.
+- La señal y el ATR se calculan al cierre de t; la ejecución es al open de t+1.
 - Orden de eventos dentro de cada barra:
   1. Open: salida por gap que cruzó SL/TP (se llena al open).
   2. Open: salida por señal opuesta (al open).
   3. Open: entrada nueva si no hay posición.
-  4. Intrabar: SL/TP con High/Low (tie → SL).
+  4. Intrabar: SL/TP con High/Low (tie → SL), incluida la barra de entrada.
   5. Close: salida por holding máximo.
-- Ties intrabar: SL tiene prioridad sobre TP
-- Una sola posición abierta a la vez. Como las entradas solo ocurren en el open, una posición cerrada intrabar o al cierre de t no se reemplaza hasta el open de t+1.
-- Transición directa long a short (o viceversa) permitida en la misma barra, solo por señal opuesta (cierre y apertura al mismo open)
+- Una sola posición abierta a la vez. Las entradas solo ocurren en el open, así que una
+  salida en los pasos 4 o 5 no se reemplaza hasta el open de t+1.
+- La transición long ↔ short en la misma barra solo ocurre por señal opuesta (paso 2 + paso 3).
 
 ## Break-even win rate
-
-Con ratio 1.5:1: WR_be = 1 / (1 + 1.5) = 0.40 = 40%. La estrategia debe superar este umbral.
+- Sin costos: p* = 1/(1+r) = 1/2.5 = **40%**. La estrategia debe superarlo.
+- Con costos: ganancia neta = r·R − C, pérdida neta = −R − C, con R = 2·ATR·Q (riesgo) y C =
+  costo ida y vuelta. Si se igualan a cero, p* = (1 + k)/(1 + r), con k = C/R.
+- Ejemplo con la mediana de train (ATR/Close = 4.37%): C = 2 × 0.15% = 0.30% del precio,
+  R = 8.74% → k = 0.034 → p* = 1.034/2.5 ≈ **41.4%**. En el percentil 10 de ATR/Close (2.97%),
+  k = 0.051 → p* ≈ 42.0%. El borrow fee de un short de 10 barras (~14 días) suma ~0.02% → k + 0.002.
