@@ -8,7 +8,18 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import src.strategy as strategy
-from src.strategy import TOTAL_COST_RATE, Position, compute_features, compute_sizing, resolve_exit, run_backtest
+from src.strategy import (
+    ADX_THRESHOLD,
+    BORROW_DAY_COUNT,
+    BORROW_FEE_ANNUAL,
+    TOTAL_COST_RATE,
+    Position,
+    compute_features,
+    compute_sizing,
+    compute_win_rate,
+    resolve_exit,
+    run_backtest,
+)
 
 # Orden cronologico de los eventos dentro de una barra (SPEC.md, seccion 7).
 PHASE_ORDER = {"open": 0, "intrabar": 1, "close": 2}
@@ -23,6 +34,9 @@ def test_sl_tp_same_bar_resolves_as_stop():
         stop_loss=95.0,
         take_profit=110.0,
         entry_bar=0,
+        entry_date=pd.Timestamp("2024-01-01"),
+        raw_entry_price=100.0,
+        truncated=False,
     )
 
     closed, reason, exit_price = resolve_exit(
@@ -40,10 +54,11 @@ def test_sizing_matches_risk_budget():
     atr_value = 10.0
     rho = 0.01
 
-    shares = compute_sizing(capital, atr_value, rho)
+    shares, truncated = compute_sizing(capital, atr_value, entry_price=100.0, rho=rho)
     risk_in_dollars = shares * 2 * atr_value
 
     assert shares == 50
+    assert not truncated
     assert risk_in_dollars == rho * capital
 
 
@@ -158,8 +173,20 @@ def test_max_holding_closes_on_tenth_bar(monkeypatch):
     assert trades[0]["exit_phase"] == "close"
 
 
-def test_signal_direction_agrees_with_score_and_sma():
-    """Long exige Z > 0.3 y Close > SMA(50); short exige Z < -0.3 y Close < SMA(50)."""
+def test_sizing_truncates_with_entry_cost():
+    """Con ATR chico frente al precio, el tope de apalancamiento 1 (con costo de entrada) recorta Q."""
+    capital = 10_000.0
+    entry_price = 100.0
+
+    shares, truncated = compute_sizing(capital, atr_value=0.1, entry_price=entry_price, rho=0.01)
+
+    assert truncated
+    assert shares == int(capital // (entry_price * (1 + TOTAL_COST_RATE)))
+    assert shares * entry_price * (1 + TOTAL_COST_RATE) <= capital
+
+
+def test_signal_follows_confluence_rule():
+    """Long exige ROC > 0, CMF > 0 y ADX > 25; short lo espejo; con ADX <= 25 la señal es flat."""
     df = pd.read_csv(Path(__file__).resolve().parents[1] / "data" / "NVDA_daily.csv",
                      index_col="Date", parse_dates=True)
     features = compute_features(df)
@@ -168,7 +195,59 @@ def test_signal_direction_agrees_with_score_and_sma():
     shorts = features[features["signal"] == -1]
 
     assert len(longs) > 0 and len(shorts) > 0
-    assert (longs["z_score"] > 0.3).all()
-    assert (df.loc[longs.index, "Close"] > longs["sma_50"]).all()
-    assert (shorts["z_score"] < -0.3).all()
-    assert (df.loc[shorts.index, "Close"] < shorts["sma_50"]).all()
+    assert ((longs["roc_10"] > 0) & (longs["cmf_20"] > 0) & (longs["adx_14"] > ADX_THRESHOLD)).all()
+    assert ((shorts["roc_10"] < 0) & (shorts["cmf_20"] < 0) & (shorts["adx_14"] > ADX_THRESHOLD)).all()
+    assert (features.loc[~(features["adx_14"] > ADX_THRESHOLD), "signal"] == 0).all()
+
+
+def test_short_pays_borrow_fee_by_calendar_days(monkeypatch):
+    """Un short abierto el viernes y cerrado el lunes paga 3 dias de borrow fee."""
+    df = _bars([
+        (100, 101, 99, 100),     # 0: lun 2024-01-01
+        (100, 101, 99, 100),     # 1: mar
+        (100, 101, 99, 100),     # 2: mie
+        (100, 101, 99, 100),     # 3: jue, señal short
+        (100, 101, 99, 100),     # 4: vie, entra short al open (SL 104, TP 94); señal long
+        (100, 101, 99, 100),     # 5: lun, la señal opuesta cierra el short al open
+    ])
+    _patch_features(monkeypatch, [0, 0, 0, -1, 1, 0])
+
+    trades = run_backtest(df, capital=10_000.0)
+    short = trades[0]
+
+    assert short["side"] == "short"
+    assert short["entry_date"] == pd.Timestamp("2024-01-05")
+    assert short["exit_date"] == pd.Timestamp("2024-01-08")
+
+    expected_fee = BORROW_FEE_ANNUAL * short["shares"] * 100.0 * 3 / BORROW_DAY_COUNT
+    assert short["borrow_fee"] == pytest.approx(expected_fee)
+    expected_pnl = short["shares"] * (short["entry_price"] - short["exit_price"]) - expected_fee
+    assert short["pnl"] == pytest.approx(expected_pnl)
+
+
+def test_same_day_short_pays_no_borrow(monkeypatch):
+    """Un short que toca el SL en la misma barra de entrada no paga borrow fee (no hay overnight)."""
+    df = _bars([
+        (100, 101, 99, 100),     # 0: señal short
+        (100, 105, 99, 104),     # 1: entra short al open (SL 104) y el High toca el SL
+    ])
+    _patch_features(monkeypatch, [-1, 0])
+
+    trades = run_backtest(df, capital=10_000.0)
+
+    assert trades[0]["exit_reason"] == "stop_loss"
+    assert trades[0]["exit_bar"] == trades[0]["entry_bar"]
+    assert trades[0]["borrow_fee"] == 0.0
+
+
+def test_win_rate_uses_net_pnl():
+    """Un short que cubre apenas por debajo de la entrada pero pierde por borrow fee cuenta como perdedor."""
+    trades = [
+        {"side": "short", "entry_price": 100.0, "exit_price": 99.999, "shares": 10,
+         "borrow_fee": 0.05, "pnl": 10 * 0.001 - 0.05},
+        {"side": "long", "entry_price": 100.0, "exit_price": 105.0, "shares": 10,
+         "borrow_fee": 0.0, "pnl": 50.0},
+    ]
+
+    assert compute_win_rate(trades) == pytest.approx(50.0)
+    assert compute_win_rate([]) == 0.0

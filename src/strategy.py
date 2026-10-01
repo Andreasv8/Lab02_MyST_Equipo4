@@ -4,17 +4,25 @@ Los indicadores viven en src/indicators.py (calculados a mano con
 pandas/numpy, sin librerias externas).
 """
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from src.indicators import atr, mfi, roc, rsi, sma
+from src.indicators import adx, atr, chaikin_money_flow, roc
 
 COMMISSION_RATE = 0.001
 SLIPPAGE_RATE = 0.0005
 TOTAL_COST_RATE = COMMISSION_RATE + SLIPPAGE_RATE
+
+# Borrow fee de los shorts: tasa anual sobre el nocional, dias calendario / 360.
+BORROW_FEE_ANNUAL = 0.005
+BORROW_DAY_COUNT = 360
+
+# Umbral de Wilder para considerar que el mercado esta en tendencia.
+ADX_THRESHOLD = 25
 
 
 @dataclass
@@ -28,13 +36,19 @@ class Position:
     shares : int
         Numero de acciones (ver compute_sizing).
     entry_price : float
-        Precio al que se abrio la posicion.
+        Precio de entrada efectivo, ya ajustado por comision y slippage.
     stop_loss : float
         Precio de stop-loss.
     take_profit : float
         Precio de take-profit.
     entry_bar : int
         Indice (posicional) de la barra en la que se abrio la posicion.
+    entry_date : pd.Timestamp
+        Fecha de la barra de entrada (para el borrow fee).
+    raw_entry_price : float
+        Open crudo de la barra de entrada, sin costos (P_e del SPEC).
+    truncated : bool
+        True si el sizing se recorto por el tope de apalancamiento 1.
     """
 
     side: str
@@ -43,14 +57,41 @@ class Position:
     stop_loss: float
     take_profit: float
     entry_bar: int
+    entry_date: pd.Timestamp
+    raw_entry_price: float
+    truncated: bool
+
+
+def confluence_signal(roc_10: pd.Series, cmf_20: pd.Series, adx_14: pd.Series,
+                      adx_threshold: float = ADX_THRESHOLD) -> pd.Series:
+    """Regla de entrada por confluencia (SPEC.md, seccion 3).
+
+    long  si ROC > 0 y CMF > 0 y ADX > umbral
+    short si ROC < 0 y CMF < 0 y ADX > umbral
+    flat  en cualquier otro caso. Las comparaciones son estrictas, asi que
+    los NaN del warm-up y los valores exactamente 0 quedan en flat.
+
+    Parametros
+    ----------
+    roc_10, cmf_20, adx_14 : pd.Series
+        Indicadores al cierre de cada barra, con el mismo indice.
+    adx_threshold : float
+        Umbral de fuerza de tendencia (25, Wilder).
+
+    Regresa
+    -------
+    pd.Series
+        Señal por barra: 1 (long), -1 (short) o 0 (flat).
+    """
+    trending = adx_14 > adx_threshold
+    signal = pd.Series(0, index=roc_10.index, dtype=int)
+    signal.loc[(roc_10 > 0) & (cmf_20 > 0) & trending] = 1
+    signal.loc[(roc_10 < 0) & (cmf_20 < 0) & trending] = -1
+    return signal
 
 
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calcula todo el pipeline de la entry rule (SPEC.md, seccion 3).
-
-    indicadores -> normalizacion -> pesos adaptativos por ATR -> score Z_t
-    -> filtro de consenso -> filtro de SMA(50) -> señal. Se regresan todas
-    las columnas intermedias para poder auditarlas (prueba de truncamiento).
+    """Calcula los indicadores de la estrategia y la señal (SPEC.md, secciones 2 y 3).
 
     Parametros
     ----------
@@ -60,65 +101,27 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     Regresa
     -------
     pd.DataFrame
-        Columnas: sma_50, rsi_14, mfi_14, roc_10, atr_14, rsi_norm, mfi_norm,
-        roc_norm, atr_mean, w_rsi, w_mfi, w_roc, z_score, consensus, signal.
-        signal es 1 (long), -1 (short) o 0 (flat).
+        Columnas: roc_10, cmf_20, adx_14, atr_14, signal. signal es 1
+        (long), -1 (short) o 0 (flat). El ATR solo se usa para SL/TP y sizing.
     """
     close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
 
-    sma_50 = sma(close, 50)
-    rsi_14 = rsi(close, 14)
-    mfi_14 = mfi(high, low, close, volume, 14)
     roc_10 = roc(close, 10)
+    cmf_20 = chaikin_money_flow(high, low, close, volume, 20)
+    adx_14 = adx(high, low, close, 14)
     atr_14 = atr(high, low, close, 14)
 
-    rsi_norm = (rsi_14 - 50) / 50
-    mfi_norm = (mfi_14 - 50) / 50
-    roc_norm = (roc_10 / 10).clip(-1, 1)
-
-    # "Media de ATR" se toma como la media historica hasta la barra actual
-    # (expanding), para no usar informacion futura al fijar el regimen.
-    atr_mean = atr_14.expanding(min_periods=1).mean()
-    high_vol = atr_14 > atr_mean
-
-    w_rsi = pd.Series(np.where(high_vol, 0.25, 0.45), index=df.index)
-    w_mfi = pd.Series(np.where(high_vol, 0.50, 0.25), index=df.index)
-    w_roc = pd.Series(np.where(high_vol, 0.25, 0.30), index=df.index)
-
-    z_score = w_rsi * rsi_norm + w_mfi * mfi_norm + w_roc * roc_norm
-
-    sign_rsi = np.sign(rsi_norm)
-    sign_mfi = np.sign(mfi_norm)
-    sign_roc = np.sign(roc_norm)
-    consensus = (sign_rsi == sign_mfi) & (sign_mfi == sign_roc) & (sign_rsi != 0)
-
-    # La direccion la da el score y SMA(50) solo la confirma: si no
-    # coinciden, la señal queda flat.
-    signal = pd.Series(0, index=df.index, dtype=int)
-    signal.loc[(z_score > 0.3) & consensus & (close > sma_50)] = 1
-    signal.loc[(z_score < -0.3) & consensus & (close < sma_50)] = -1
-
     return pd.DataFrame({
-        "sma_50": sma_50,
-        "rsi_14": rsi_14,
-        "mfi_14": mfi_14,
         "roc_10": roc_10,
+        "cmf_20": cmf_20,
+        "adx_14": adx_14,
         "atr_14": atr_14,
-        "rsi_norm": rsi_norm,
-        "mfi_norm": mfi_norm,
-        "roc_norm": roc_norm,
-        "atr_mean": atr_mean,
-        "w_rsi": w_rsi,
-        "w_mfi": w_mfi,
-        "w_roc": w_roc,
-        "z_score": z_score,
-        "consensus": consensus,
-        "signal": signal,
+        "signal": confluence_signal(roc_10, cmf_20, adx_14),
     })
 
 
 def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
-    """Señal de entrada por barra (SPEC.md, seccion 3).
+    """Señal de entrada por barra con la regla de confluencia (SPEC.md, seccion 3).
 
     Parametros
     ----------
@@ -133,33 +136,70 @@ def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
     return compute_features(df)["signal"]
 
 
-def compute_sizing(capital: float, atr_value: float, rho: float = 0.01) -> int:
-    """Sizing por risk-parity segun ATR (SPEC.md, seccion 5).
+def compute_sizing(capital: float, atr_value: float, entry_price: float,
+                   rho: float = 0.01) -> tuple[int, bool]:
+    """Sizing por risk-parity segun ATR con apalancamiento maximo 1 (SPEC.md, seccion 5).
 
-    Q = (rho * capital) / (2 * ATR). El resultado se trunca a un entero de
-    acciones (no se pueden comprar fracciones de accion).
+    Q = floor(rho * capital / (2 * ATR)). Si el nocional mas el costo de
+    entrada excede el capital (Q * P_e * (1 + c) > V), se recorta a
+    Q = floor(V / (P_e * (1 + c))) y se marca como truncado.
 
     Parametros
     ----------
     capital : float
         Capital disponible (V_t).
     atr_value : float
-        ATR(14) vigente en la barra de entrada.
+        ATR(14) de la barra de señal.
+    entry_price : float
+        Precio crudo de entrada (P_e, open de la barra de ejecucion).
     rho : float
         Presupuesto de riesgo por trade, como fraccion del capital.
 
     Regresa
     -------
-    int
-        Numero de acciones a comprar/vender en corto.
+    tuple[int, bool]
+        (numero de acciones, si se trunco por el tope de apalancamiento).
     """
-    risk_budget = rho * capital
-    stop_distance = 2 * atr_value
-    return int(risk_budget / stop_distance)
+    shares = math.floor(rho * capital / (2 * atr_value))
+    cost_per_share = entry_price * (1 + TOTAL_COST_RATE)
+
+    if shares * cost_per_share > capital:
+        return math.floor(capital / cost_per_share), True
+    return shares, False
+
+
+def compute_borrow_fee(side: str, shares: int, raw_entry_price: float,
+                       entry_date: pd.Timestamp, exit_date: pd.Timestamp) -> float:
+    """Costo de pedir prestadas las acciones de un short (SPEC.md, seccion 6).
+
+    fee = BORROW_FEE_ANNUAL * Q * P_e * dias / 360, con P_e crudo y dias
+    calendario entre la entrada y la salida. Un short abierto y cerrado el
+    mismo dia paga 0 (no hay overnight). Los longs no pagan borrow.
+
+    Parametros
+    ----------
+    side : str
+        "long" o "short".
+    shares : int
+        Numero de acciones de la posicion.
+    raw_entry_price : float
+        Open crudo de la barra de entrada.
+    entry_date, exit_date : pd.Timestamp
+        Fechas de las barras de entrada y salida.
+
+    Regresa
+    -------
+    float
+        Borrow fee en dolares (0.0 para longs).
+    """
+    if side != "short":
+        return 0.0
+    days = (exit_date - entry_date).days
+    return BORROW_FEE_ANNUAL * shares * raw_entry_price * days / BORROW_DAY_COUNT
 
 
 def resolve_exit(position: Position, bar_high: float, bar_low: float, bar_close: float,
-                  bar_index: int, max_holding: int = 10) -> tuple[bool, Optional[str], Optional[float]]:
+                 bar_index: int, max_holding: int = 10) -> tuple[bool, Optional[str], Optional[float]]:
     """Revisa si una posicion debe cerrarse en la barra actual (SPEC.md, seccion 4).
 
     Si el High y el Low de la barra tocan tanto el take-profit como el
@@ -256,7 +296,7 @@ def _adjust_exit_price(raw_price: float, side: str) -> float:
 
 
 def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01,
-                  sl_mult: float = 2.0, tp_mult: float = 3.0, max_holding: int = 10) -> list[dict]:
+                 sl_mult: float = 2.0, tp_mult: float = 3.0, max_holding: int = 10) -> list[dict]:
     """Maquina de estados de la estrategia completa (entry + exit + sizing).
 
     Mantiene como maximo una posicion abierta a la vez. Cada barra t se
@@ -273,28 +313,34 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
 
     El precio de entrada/salida efectivo incluye comision (0.1%) y slippage
     (0.05%); el SL y el TP se calculan sobre el precio crudo (sin costos).
-    El capital se actualiza con el P&L realizado de cada trade y el sizing
-    del siguiente trade usa ese capital actualizado.
+    Los shorts pagan ademas borrow fee por dias calendario. El capital se
+    actualiza con el P&L neto de cada trade y el sizing del siguiente trade
+    usa ese capital actualizado. Una posicion que sigue abierta al final de
+    la serie no se registra.
 
     Parametros
     ----------
     df : pd.DataFrame
-        Debe incluir columnas "Open", "High", "Low", "Close", "Volume".
+        Debe incluir columnas "Open", "High", "Low", "Close", "Volume" e
+        indice de fechas.
     capital, rho, sl_mult, tp_mult, max_holding
         Ver SPEC.md, secciones 4 y 5.
 
     Regresa
     -------
     list[dict]
-        Un registro por operacion cerrada, con entry_bar, exit_bar, side,
-        entry_price, exit_price, shares, exit_reason, exit_phase ("open",
-        "intrabar" o "close") y pnl. entry_price y exit_price ya incluyen el
-        ajuste por costos. Toda entrada ocurre en el open de entry_bar.
+        Un registro por operacion cerrada, con entry_bar, exit_bar,
+        entry_date, exit_date, side, entry_price, exit_price, shares,
+        truncated, exit_reason, exit_phase ("open", "intrabar" o "close"),
+        borrow_fee y pnl. entry_price y exit_price ya incluyen el ajuste por
+        costos; pnl es neto de comision, slippage y borrow fee. Toda entrada
+        ocurre en el open de entry_bar.
     """
     features = compute_features(df)
     sig = features["signal"].to_numpy()
     atr_vals = features["atr_14"].to_numpy()
 
+    dates = df.index
     opens = df["Open"].to_numpy()
     highs = df["High"].to_numpy()
     lows = df["Low"].to_numpy()
@@ -307,20 +353,27 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
 
     def _close(position: Position, exit_bar: int, raw_exit_price: float, reason: str, phase: str) -> float:
         exit_price = _adjust_exit_price(raw_exit_price, position.side)
+        exit_date = dates[exit_bar]
+        borrow_fee = compute_borrow_fee(position.side, position.shares, position.raw_entry_price,
+                                        position.entry_date, exit_date)
         if position.side == "long":
             pnl = position.shares * (exit_price - position.entry_price)
         else:
-            pnl = position.shares * (position.entry_price - exit_price)
+            pnl = position.shares * (position.entry_price - exit_price) - borrow_fee
 
         trades.append({
             "entry_bar": position.entry_bar,
             "exit_bar": exit_bar,
+            "entry_date": position.entry_date,
+            "exit_date": exit_date,
             "side": position.side,
             "entry_price": position.entry_price,
             "exit_price": exit_price,
             "shares": position.shares,
+            "truncated": position.truncated,
             "exit_reason": reason,
             "exit_phase": phase,
+            "borrow_fee": borrow_fee,
             "pnl": pnl,
         })
         return pnl
@@ -346,7 +399,7 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
         if position is None and desired_side != 0 and not np.isnan(atr_vals[t - 1]):
             raw_entry_price = opens[t]
             atr_at_entry = atr_vals[t - 1]
-            shares = compute_sizing(equity, atr_at_entry, rho)
+            shares, truncated = compute_sizing(equity, atr_at_entry, raw_entry_price, rho)
 
             if shares > 0:
                 side = "long" if desired_side == 1 else "short"
@@ -364,6 +417,9 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     entry_bar=t,
+                    entry_date=dates[t],
+                    raw_entry_price=raw_entry_price,
+                    truncated=truncated,
                 )
 
         # 4 y 5. SL/TP intrabar (incluida la barra de entrada) y holding maximo al cierre.
@@ -380,9 +436,9 @@ def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01
 def compute_win_rate(trades: list[dict]) -> float:
     """Calcula el porcentaje de trades ganadores (SPEC.md, break-even win rate).
 
-    Un trade ganador es aquel donde exit_price > entry_price (long) o
-    entry_price > exit_price (short), usando los precios ya ajustados por
-    costos que regresa run_backtest.
+    Un trade gana si su pnl neto es > 0. El pnl ya descuenta comision,
+    slippage y borrow fee, asi que un trade con precio de salida apenas
+    mejor que el de entrada puede contar como perdedor.
 
     Parametros
     ----------
@@ -397,13 +453,5 @@ def compute_win_rate(trades: list[dict]) -> float:
     if not trades:
         return 0.0
 
-    wins = 0
-    for trade in trades:
-        if trade["side"] == "long":
-            if trade["exit_price"] > trade["entry_price"]:
-                wins += 1
-        else:
-            if trade["entry_price"] > trade["exit_price"]:
-                wins += 1
-
+    wins = sum(1 for trade in trades if trade["pnl"] > 0)
     return 100.0 * wins / len(trades)

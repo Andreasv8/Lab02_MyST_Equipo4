@@ -56,12 +56,14 @@ Con valores al cierre de la barra t:
 Risk parity por ATR con ρ = 1% del capital y apalancamiento máximo 1:
 
     Q = floor( 0.01 · V_t / (2 · ATR_t) )
-    si Q · P_e > V_t:  Q = floor( V_t / P_e )   y el trade se marca truncated = True
+    si Q · P_e · (1 + c) > V_t:  Q = floor( V_t / (P_e · (1 + c)) )   y el trade se marca truncated = True
     si Q ≤ 0: no se opera
 
+- c = costo por lado = comisión + spread/slippage = 0.15% (sección 6), para que el nocional más
+  el costo de entrada no exceda el capital.
 - V_t = capital (cash) realizado al momento de la entrada; no hay margen, el tope aplica igual a
   long y short (nocional ≤ V_t). P_e = open de t+1.
-- El tope se activa solo si ATR_t/P_e < 0.5%; en train el mínimo de ATR/Close es 2.4%, así que
+- El tope se activa solo si ATR_t/P_e < ~0.5%; en train el mínimo de ATR/Close es 2.4%, así que
   se espera que casi nunca se active, pero la regla y el registro existen.
 
 ## 6. Costs
@@ -71,7 +73,7 @@ Por lado (entrada y salida), como fracción del nocional:
 |---|---|---|
 | Comisión | 0.10% | IBKR Pro Fixed cobra $0.005/acción (máx. 1% del nocional), que a los precios reales de NVDA es < 0.01%; 0.10% es una cota conservadora y en porcentaje no depende del ajuste por split |
 | Spread + slippage | 0.05% | La mitad del spread cotizado de NVDA es ~1 centavo (< 0.01%); 0.05% deja margen para el slippage al open |
-| Borrow fee (solo shorts) | 0.50% anual | NVDA es general collateral (fácil de pedir prestado); cargo = 0.005 · nocional · días_calendario / 360 |
+| Borrow fee (solo shorts) | 0.50% anual | NVDA es general collateral (fácil de pedir prestado); cargo = 0.005 · Q · P_e · días / 360, con P_e crudo y días = fecha de salida − fecha de entrada (calendario); un short abierto y cerrado el mismo día paga 0 (no hay overnight) |
 
 - Sin impacto de mercado: el nocional máximo es V_t ≈ $100k, frente a un volumen diario mediano
   en train de ~463M acciones (ajustadas) ≈ $13B → < 0.001% del volumen diario.
