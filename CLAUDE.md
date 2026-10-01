@@ -30,6 +30,7 @@ lab_02/
 │   └── NVDA_daily.csv
 ├── src/
 │   ├── __init__.py
+│   ├── backtest.py         <-- motor orientado a eventos (cash, shares, equity)
 │   ├── indicators.py
 │   ├── splits.py
 │   └── strategy.py
