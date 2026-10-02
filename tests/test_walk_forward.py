@@ -57,13 +57,15 @@ def _corrupt_after(df: pd.DataFrame, end: str) -> pd.DataFrame:
 
 
 def _assert_models_equal(a, b):
-    pd.testing.assert_series_equal(a.scaler.mean, b.scaler.mean)
-    pd.testing.assert_series_equal(a.scaler.std, b.scaler.std)
+    pd.testing.assert_series_equal(a.scaler.mean, b.scaler.mean, check_exact=True)
+    pd.testing.assert_series_equal(a.scaler.std, b.scaler.std, check_exact=True)
     assert a.vol_threshold == b.vol_threshold
     assert a.hmm_names == b.hmm_names
     assert a.hmm_choice == b.hmm_choice
+    # El EM del HMM usa BLAS multihilo y el orden de las sumas puede variar entre
+    # corridas (diferencias relativas ~1e-12); un look-ahead real daria diferencias grandes.
     for attr in ["startprob_", "transmat_", "means_", "covars_"]:
-        np.testing.assert_array_equal(getattr(a.hmm, attr), getattr(b.hmm, attr))
+        np.testing.assert_allclose(getattr(a.hmm, attr), getattr(b.hmm, attr), rtol=1e-9, atol=0)
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +91,8 @@ def test_eval_block_ignores_data_after_eval_end(i, regime):
         alt = prepare_block(df_alt, block, MODELS[i])
         pd.testing.assert_series_equal(full.labels, alt.labels)
         run_alt = run_block(alt, THETA, regime)
-        pd.testing.assert_frame_equal(run_full.equity, run_alt.equity)
-        pd.testing.assert_frame_equal(run_full.trades, run_alt.trades)
+        pd.testing.assert_frame_equal(run_full.equity, run_alt.equity, check_exact=True)
+        pd.testing.assert_frame_equal(run_full.trades, run_alt.trades, check_exact=True)
 
 
 def test_eval_window_is_inside_block():
@@ -117,10 +119,10 @@ def test_sliced_backtest_matches_masked_full_backtest(i, regime):
     full = backtest(df_trunc, signal.where(allowed, 0), atr, theta_config(THETA))
 
     sliced = run_block(data, THETA, regime)
-    pd.testing.assert_frame_equal(full.equity.loc[block.eval_start:], sliced.equity)
+    pd.testing.assert_frame_equal(full.equity.loc[block.eval_start:], sliced.equity, check_exact=True)
     bar_cols = ["entry_bar", "exit_bar"]
     pd.testing.assert_frame_equal(full.trades.drop(columns=bar_cols),
-                                  sliced.trades.drop(columns=bar_cols))
+                                  sliced.trades.drop(columns=bar_cols), check_exact=True)
 
 
 def test_regime_entries_only_in_regime():
@@ -232,8 +234,8 @@ def test_combined_with_one_regime_equals_regime_run(regime):
     only = {name: (theta if name == regime else None) for name in COMBINED}
     combined = walk_forward_regimes_run(BLOCKS_DATA, only)
     single = walk_forward_run(BLOCKS_DATA, theta, regime)
-    pd.testing.assert_frame_equal(combined.equity, single.equity)
-    pd.testing.assert_frame_equal(combined.trades, single.trades)
+    pd.testing.assert_frame_equal(combined.equity, single.equity, check_exact=True)
+    pd.testing.assert_frame_equal(combined.trades, single.trades, check_exact=True)
 
 
 @pytest.mark.parametrize("i", BLOCK_IDS)
@@ -260,5 +262,5 @@ def test_combined_ignores_data_after_eval_end(i):
     full = run_block_regimes(BLOCKS_DATA[i], COMBINED)
     for df_alt in [DF.loc[:block.eval_end], _corrupt_after(DF, block.eval_end)]:
         alt = run_block_regimes(prepare_block(df_alt, block, MODELS[i]), COMBINED)
-        pd.testing.assert_frame_equal(full.equity, alt.equity)
-        pd.testing.assert_frame_equal(full.trades, alt.trades)
+        pd.testing.assert_frame_equal(full.equity, alt.equity, check_exact=True)
+        pd.testing.assert_frame_equal(full.trades, alt.trades, check_exact=True)
