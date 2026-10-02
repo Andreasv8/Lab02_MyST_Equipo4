@@ -179,3 +179,6 @@ ver resultados.
    que respeta la regla anti look-ahead.
 8. **Implementación prevista**: módulo nuevo `src/walk_forward.py` con sus tests y notebook
    `Act_07_robust.ipynb`. El código y el notebook de v1 no se modifican.
+9. **Redondeo de max_holding** (aclarada antes de correr nada): con 20 trials la mediana es el
+   promedio del 10º y el 11º y puede quedar en x.5; se redondea **half-up**,
+   `floor(x + 0.5)` (12.5 → 13).
