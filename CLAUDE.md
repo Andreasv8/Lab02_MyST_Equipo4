@@ -26,6 +26,7 @@ lab_02/
 ├── ACT07_ROBUST.md        <-- pre-registro de Act 07 v2 (robusta)
 ├── Act_06_backtest.ipynb  <-- entregable Act 06 (train + test; validation no se carga)
 ├── Act_07_regimes.ipynb   <-- entregable Act 07: regimenes + optimizacion (train + test; validation no se carga)
+├── Act_07_robust.ipynb    <-- Act 07 v2: walk-forward, meseta y evaluacion unica en test (validation no se carga)
 ├── data/
 │   ├── download_data.py
 │   ├── indicator_analysis.py   <-- correlacion de indicadores (solo train)
@@ -40,6 +41,7 @@ lab_02/
 │   ├── optimization.py     <-- Optuna: θ* unico y θ*_j por regimen, estrategia combinada (Act 07)
 │   ├── plots.py            <-- graficas de los notebooks (matplotlib)
 │   ├── regime_analysis.py  <-- comparacion de clasificadores de regimen (Act 07)
+│   ├── robust_evaluation.py <-- Act 07 v2: 6 estrategias en test y criterios pre-registrados
 │   ├── regimes.py          <-- features de regimen (Act 07), scaler y clasificadores (reglas, K-means, HMM) solo-train
 │   ├── splits.py
 │   ├── strategy.py
@@ -52,6 +54,7 @@ lab_02/
     ├── test_optimization.py
     ├── test_regime_analysis.py
     ├── test_regimes.py
+    ├── test_robust_evaluation.py
     ├── test_strategy.py
     ├── test_truncation.py
     └── test_walk_forward.py

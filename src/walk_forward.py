@@ -20,7 +20,7 @@ import optuna
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
 
-from src.backtest import BacktestResult, backtest
+from src.backtest import BacktestConfig, BacktestResult, backtest
 from src.optimization import PARAM_SPACE, SEED, THETA0, objective, theta_config, theta_signal
 from src.regimes import (
     REGIME_NAMES,
@@ -177,6 +177,37 @@ def walk_forward_run(blocks_data: list, theta: dict, regime: Optional[str] = Non
     return BacktestResult(equity=equity.to_frame("equity"), trades=trades)
 
 
+
+def run_block_regimes(data: BlockData, regime_thetas: dict) -> BacktestResult:
+    """Backtest del tramo con la estrategia combinada por regimen.
+
+    En cada barra de señal con etiqueta filtrada j y θ_j (no None) la señal es
+    la de θ0 y sl/tp/holding son los de θ_j; el motor los fija al entrar. En
+    regimenes sin θ (o apagados) la señal es 0 y la salida queda con θ0 de
+    relleno (nunca se usa porque no hay entrada), como en v1.
+    """
+    active = [name for name, theta in regime_thetas.items() if theta is not None]
+    signal = data.signal.where(data.labels.isin(active), 0)
+    index = data.signal.index
+    sl = pd.Series(float(THETA0["sl_mult"]), index=index)
+    tp = pd.Series(float(THETA0["sl_mult"] * THETA0["rr"]), index=index)
+    holding = pd.Series(float(THETA0["max_holding"]), index=index)
+    for name in active:
+        theta, mask = regime_thetas[name], data.labels == name
+        sl[mask] = theta["sl_mult"]
+        tp[mask] = theta["sl_mult"] * theta["rr"]
+        holding[mask] = int(theta["max_holding"])
+    return backtest(data.df_eval, signal, data.atr, BacktestConfig(),
+                    sl_mult=sl, tp_mult=tp, max_holding=holding)
+
+
+def walk_forward_regimes_run(blocks_data: list, regime_thetas: dict) -> BacktestResult:
+    """Estrategia combinada en los tramos de evaluacion: equity encadenada y trades juntos."""
+    runs = [run_block_regimes(data, regime_thetas) for data in blocks_data]
+    equity = chain_equity([r.equity["equity"] for r in runs], BacktestConfig().initial_cash)
+    trades = pd.concat([r.trades for r in runs], ignore_index=True)
+    return BacktestResult(equity=equity.to_frame("equity"), trades=trades)
+
 # ---------------------------------------------------------------------------
 # Busqueda y meseta
 # ---------------------------------------------------------------------------
@@ -313,6 +344,11 @@ def run_walk_forward(df: pd.DataFrame, n_trials: int = N_TRIALS,
         thetas[name] = plateau_theta(study)
         operate[name] = True if regime is None else operates(study)
     return WalkForwardResult(models, blocks_data, studies, thetas, operate)
+
+
+def operating_thetas(result: WalkForwardResult) -> dict:
+    """Regimen -> θ de la meseta, o None si la regla a priori lo apaga."""
+    return {name: result.thetas[name] if result.operates[name] else None for name in REGIME_NAMES}
 
 
 def blocks_table(result: WalkForwardResult) -> pd.DataFrame:

@@ -274,7 +274,9 @@ def plot_feature_distributions(features: pd.DataFrame, labels_df: pd.DataFrame,
 STUDY_COLORS = {"global": "#1f1e1c", **REGIME_COLORS}
 
 
-def plot_convergence(ax: plt.Axes, curves: dict, n_startup: int = 150) -> plt.Axes:
+def plot_convergence(ax: plt.Axes, curves: dict, n_startup: int = 150,
+                     title: str = "Convergencia: mejor J acumulado por trial (train)",
+                     ylabel: str = "Mejor Calmar en train (adimensional)") -> plt.Axes:
     """Convergencia de Optuna: mejor J (Calmar en train) acumulado contra el numero de trial.
 
     Parametros
@@ -285,6 +287,8 @@ def plot_convergence(ax: plt.Axes, curves: dict, n_startup: int = 150) -> plt.Ax
         Nombre del estudio ("global" o regimen) -> salida de convergence_curve.
     n_startup : int
         Trials aleatorios iniciales (linea vertical: ahi empieza TPE).
+    title, ylabel : str
+        Titulo y etiqueta del eje y.
 
     Regresa
     -------
@@ -297,9 +301,9 @@ def plot_convergence(ax: plt.Axes, curves: dict, n_startup: int = 150) -> plt.Ax
     ax.axvline(n_startup, color=REFERENCE_COLOR, linestyle="--", linewidth=1)
     ax.annotate("fin random search / inicio TPE", xy=(n_startup, 0), xycoords=("data", "axes fraction"),
                 xytext=(4, 6), textcoords="offset points", fontsize=9, color="#3d3c39")
-    ax.set_title("Convergencia: mejor J acumulado por trial (train)")
+    ax.set_title(title)
     ax.set_xlabel("Trial")
-    ax.set_ylabel("Mejor Calmar en train (adimensional)")
+    ax.set_ylabel(ylabel)
     ax.legend(loc="lower right", frameon=False)
     _style(ax)
     return ax
@@ -330,10 +334,13 @@ def plot_param_importances(ax: plt.Axes, importances: pd.Series, title: str) -> 
 
 
 EQUITY_CURVE_COLORS = {"buy & hold": BENCHMARK_COLOR, "θ0": REFERENCE_COLOR,
-                       "θ*": "#1f1e1c", "θ*_régimen": STRATEGY_COLOR}
+                       "θ*": "#1f1e1c", "θ*_régimen": STRATEGY_COLOR,
+                       "v1 θ*": "#e8a33d", "v1 θ*_régimen": "#e34948",
+                       "v2 θ* robusto": "#1f1e1c", "v2 θ*_régimen robusto": STRATEGY_COLOR}
 
 
-def plot_equity_curves(ax: plt.Axes, curves: dict, split_date: pd.Timestamp) -> plt.Axes:
+def plot_equity_curves(ax: plt.Axes, curves: dict, split_date: pd.Timestamp,
+                       title: str = "Equity: buy & hold vs θ0, θ* y θ* por régimen (escala log)") -> plt.Axes:
     """Curvas de equity de varias estrategias en escala logaritmica, con el corte train/test.
 
     Parametros
@@ -344,6 +351,8 @@ def plot_equity_curves(ax: plt.Axes, curves: dict, split_date: pd.Timestamp) -> 
         Nombre -> equity por barra (USD).
     split_date : pd.Timestamp
         Primer dia de test (linea vertical).
+    title : str
+        Titulo del panel.
 
     Regresa
     -------
@@ -357,9 +366,43 @@ def plot_equity_curves(ax: plt.Axes, curves: dict, split_date: pd.Timestamp) -> 
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
     ax.yaxis.set_minor_locator(mticker.NullLocator())
     _split_line(ax, split_date)
-    ax.set_title("Equity: buy & hold vs θ0, θ* y θ* por régimen (escala log)")
+    ax.set_title(title)
     ax.set_xlabel("Fecha")
     ax.set_ylabel("Equity (USD, escala log)")
     ax.legend(loc="upper left", frameon=False)
     _style(ax)
     return ax
+
+
+def plot_plateau(axes, study, top: list, theta: dict, name: str) -> None:
+    """Meseta de un estudio: J walk-forward contra cada parametro de salida.
+
+    Un panel por parametro: todos los trials con J finito en gris, el top 10%
+    en el color del estudio y una linea vertical en el θ final (mediana del top).
+
+    Parametros
+    ----------
+    axes : arreglo de plt.Axes
+        Un eje por parametro, en el orden de theta_params.
+    study : optuna.Study
+        Estudio del walk-forward.
+    top : list de optuna.trial.FrozenTrial
+        Trials del top 10% (top_trials).
+    theta : dict
+        θ final del estudio.
+    name : str
+        Nombre del estudio ("global" o regimen).
+    """
+    finite = [t for t in study.trials if t.value is not None and np.isfinite(t.value)]
+    color = STUDY_COLORS.get(name, STRATEGY_COLOR)
+    for ax, param in zip(axes, ["sl_mult", "rr", "max_holding"]):
+        ax.scatter([t.params[param] for t in finite], [t.value for t in finite],
+                   s=12, color=REFERENCE_COLOR, alpha=0.6, label="trials con J finito")
+        ax.scatter([t.params[param] for t in top], [t.value for t in top],
+                   s=22, color=color, label="top 10%")
+        ax.axvline(theta[param], color=color, linestyle="--", linewidth=1.2, label="θ final (mediana)")
+        ax.set_title(f"{name}: {param}")
+        ax.set_xlabel(param)
+        ax.set_ylabel("J walk-forward (Calmar OOS)")
+        _style(ax)
+    axes[0].legend(loc="lower left", frameon=False, fontsize=8)

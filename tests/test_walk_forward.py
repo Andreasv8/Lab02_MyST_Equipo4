@@ -27,7 +27,10 @@ from src.walk_forward import (
     plateau_theta,
     prepare_block,
     run_block,
+    run_block_regimes,
     top_trials,
+    walk_forward_regimes_run,
+    walk_forward_run,
 )
 
 TEST_END = SPLITS["test"][1]
@@ -210,3 +213,52 @@ def test_operates_rule(best, expected):
     """Regla a priori: se opera solo si el mejor J > 0."""
     study = _synthetic_study([(best, 1.0, 1.0, 5), (min(best, -1.0), 2.0, 2.0, 6)])
     assert operates(study) is expected
+
+
+# ---------------------------------------------------------------------------
+# Estrategia combinada por regimen en el walk-forward (aclaracion 10)
+# ---------------------------------------------------------------------------
+
+THETA_CRISIS = {**THETA0, "sl_mult": 1.2, "rr": 2.5, "max_holding": 5}
+THETA_TREND = {**THETA0, "sl_mult": 2.8, "rr": 1.9, "max_holding": 13}
+COMBINED = {"crisis": THETA_CRISIS, "trend": THETA_TREND, "mean_reversion": None}
+BLOCKS_DATA = [prepare_block(DF, block, models) for block, models in zip(BLOCKS, MODELS)]
+
+
+@pytest.mark.parametrize("regime", ["crisis", "trend"])
+def test_combined_with_one_regime_equals_regime_run(regime):
+    """Con un solo regimen con θ, la combinada == walk_forward_run(.., θ, regimen)."""
+    theta = COMBINED[regime]
+    only = {name: (theta if name == regime else None) for name in COMBINED}
+    combined = walk_forward_regimes_run(BLOCKS_DATA, only)
+    single = walk_forward_run(BLOCKS_DATA, theta, regime)
+    pd.testing.assert_frame_equal(combined.equity, single.equity)
+    pd.testing.assert_frame_equal(combined.trades, single.trades)
+
+
+@pytest.mark.parametrize("i", BLOCK_IDS)
+def test_combined_entries_use_their_regime_theta(i):
+    """Toda entrada tiene etiqueta crisis o trend en su barra de señal; en las salidas por SL
+    intrabar, |salida - entrada| = sl_mult del regimen de la barra de señal · ATR."""
+    data = BLOCKS_DATA[i]
+    trades = run_block_regimes(data, COMBINED).trades
+    signal_labels = data.labels.iloc[trades["entry_bar"] - 1].to_numpy()
+    assert set(signal_labels) <= {"crisis", "trend"}
+    sl = np.array([COMBINED[label]["sl_mult"] for label in signal_labels])
+    stops = trades["exit_reason"] == "stop_loss"
+    if stops.any():
+        moved = (trades.loc[stops, "raw_exit_price"] - trades.loc[stops, "raw_entry_price"]).abs()
+        gap = trades.loc[stops, "exit_phase"] == "open"
+        expected = sl[stops.to_numpy()] * trades.loc[stops, "entry_atr"]
+        np.testing.assert_allclose(moved[~gap], expected[~gap], rtol=1e-9)
+
+
+@pytest.mark.parametrize("i", BLOCK_IDS)
+def test_combined_ignores_data_after_eval_end(i):
+    """La combinada del tramo es identica si se borra o corrompe todo lo posterior a eval_end."""
+    block = BLOCKS[i]
+    full = run_block_regimes(BLOCKS_DATA[i], COMBINED)
+    for df_alt in [DF.loc[:block.eval_end], _corrupt_after(DF, block.eval_end)]:
+        alt = run_block_regimes(prepare_block(df_alt, block, MODELS[i]), COMBINED)
+        pd.testing.assert_frame_equal(full.equity, alt.equity)
+        pd.testing.assert_frame_equal(full.trades, alt.trades)
