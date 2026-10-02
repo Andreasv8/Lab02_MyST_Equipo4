@@ -182,3 +182,19 @@ ver resultados.
 9. **Redondeo de max_holding** (aclarada antes de correr nada): con 20 trials la mediana es el
    promedio del 10º y el 11º y puede quedar en x.5; se redondea **half-up**,
    `floor(x + 0.5)` (12.5 → 13).
+
+---
+
+## 10. Aclaraciones antes de correr
+
+Fijadas el 2026-10-02, después del walk-forward y **antes de evaluar test**. Precisan cómo se
+calculan los criterios de lectura de la sección 8; no cambian ni el diseño ni los θ.
+
+10. **J walk-forward de v2 θ*_régimen**: Calmar de la equity OOS encadenada de la estrategia
+    **combinada** (crisis y trend con su θ de la meseta, mean_reversion apagado), con los modelos
+    de régimen de cada bloque. Es el análogo del J en train de v1 θ*_régimen (también combinada).
+11. **Caída del criterio 1**: v2 debe caer menos que v1 en **absoluta** (J_ref − J_test) **y** en
+    **relativa** ((J_ref − J_test) / J_ref). Si solo una se cumple, el criterio no se cumple.
+    J_ref = J walk-forward en v2 y Calmar en train en v1; J_test = Calmar en test.
+12. **Borde del criterio 2**: un parámetro está en el borde si su distancia al límite más cercano
+    es ≤ **10% del ancho de su rango** (0.2 en sl_mult y rr; 1.5 en max_holding).
