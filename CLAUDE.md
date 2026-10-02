@@ -23,6 +23,7 @@ Hereda las convenciones globales del CLAUDE.md de la raiz del repo.
 lab_02/
 ├── CLAUDE.md
 ├── SPEC.md
+├── ACT07_ROBUST.md        <-- pre-registro de Act 07 v2 (robusta)
 ├── Act_06_backtest.ipynb  <-- entregable Act 06 (train + test; validation no se carga)
 ├── Act_07_regimes.ipynb   <-- entregable Act 07: regimenes + optimizacion (train + test; validation no se carga)
 ├── data/
@@ -41,7 +42,8 @@ lab_02/
 │   ├── regime_analysis.py  <-- comparacion de clasificadores de regimen (Act 07)
 │   ├── regimes.py          <-- features de regimen (Act 07), scaler y clasificadores (reglas, K-means, HMM) solo-train
 │   ├── splits.py
-│   └── strategy.py
+│   ├── strategy.py
+│   └── walk_forward.py     <-- Act 07 v2: walk-forward robusto, salida optimizada y meseta (ACT07_ROBUST.md)
 └── tests/
     ├── golden/backtest_scenario.csv
     ├── test_analysis.py
@@ -51,5 +53,6 @@ lab_02/
     ├── test_regime_analysis.py
     ├── test_regimes.py
     ├── test_strategy.py
-    └── test_truncation.py
+    ├── test_truncation.py
+    └── test_walk_forward.py
 ```
