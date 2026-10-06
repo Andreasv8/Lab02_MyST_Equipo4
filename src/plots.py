@@ -63,7 +63,7 @@ def plot_equity(ax: plt.Axes, strategy: pd.Series, benchmark: pd.Series,
     plt.Axes
     """
     ax.plot(strategy.index, strategy, color=STRATEGY_COLOR, linewidth=2, label="Estrategia")
-    ax.plot(benchmark.index, benchmark, color=BENCHMARK_COLOR, linewidth=2, label="Buy & hold NVDA")
+    ax.plot(benchmark.index, benchmark, color=BENCHMARK_COLOR, linewidth=2, label="Buy & hold BTCUSDT")
     ax.set_yscale("log")
     ax.yaxis.set_major_locator(mticker.LogLocator(base=10, subs=[1.0, 2.0, 5.0]))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
@@ -95,7 +95,7 @@ def plot_drawdown(ax: plt.Axes, strategy_dd: pd.Series, benchmark_dd: pd.Series,
     plt.Axes
     """
     ax.plot(benchmark_dd.index, benchmark_dd * 100, color=BENCHMARK_COLOR, linewidth=1.5,
-            label="Buy & hold NVDA")
+            label="Buy & hold BTCUSDT")
     ax.plot(strategy_dd.index, strategy_dd * 100, color=STRATEGY_COLOR, linewidth=1.5, label="Estrategia")
     ax.set_ylim(top=0)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
@@ -220,13 +220,13 @@ def plot_regime_timeline(close: pd.Series, labels_df: pd.DataFrame,
         ax.set_title(REGIME_PANEL_TITLES[method])
         _style(ax)
     for ax in axes[:, 0]:
-        ax.set_ylabel("Cierre NVDA (USD)")
+        ax.set_ylabel("Cierre BTCUSDT (USDT)")
     for ax in axes[1, :]:
         ax.set_xlabel("Fecha")
     handles = [Line2D([], [], color=c, linewidth=2.5, label=n) for n, c in REGIME_COLORS.items()]
     handles.append(Line2D([], [], color=WARMUP_COLOR, linewidth=2.5, label="warm-up (sin features)"))
     fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False)
-    fig.suptitle("Regimenes de NVDA por metodo (train + test)")
+    fig.suptitle("Regimenes de BTCUSDT por metodo (train + test)")
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     return fig
 
