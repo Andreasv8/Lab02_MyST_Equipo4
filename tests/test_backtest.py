@@ -186,3 +186,19 @@ def test_force_exit_none_matches_all_false():
     never = pd.Series(False, index=df.index)
     _same_result(backtest(df, signal, atr, LAB_CONFIG, force_exit=None),
                  backtest(df, signal, atr, LAB_CONFIG, force_exit=never))
+
+
+def test_rho_per_bar_none_matches_constant_series():
+    """rho=None usa config.rho: da lo mismo que una serie constante con ese valor."""
+    df, signal, atr = _golden()
+    constant = pd.Series(LAB_CONFIG.rho, index=df.index)
+    _same_result(backtest(df, signal, atr, LAB_CONFIG),
+                 backtest(df, signal, atr, LAB_CONFIG, rho=constant))
+
+
+def test_rho_per_bar_is_taken_from_signal_bar():
+    """Con rho del doble en la barra de señal, el long entra con el doble de unidades."""
+    df, signal, atr = _golden()
+    rho = pd.Series([0.02, 0.01, 0.01, 0.01, 0.01], index=df.index)
+    first = backtest(df, signal, atr, LAB_CONFIG, rho=rho).trades.iloc[0]
+    assert first["shares"] == pytest.approx(0.02 * 10_000 / (2 * 2))

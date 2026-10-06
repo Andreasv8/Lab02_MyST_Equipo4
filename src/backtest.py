@@ -298,7 +298,8 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
              config: BacktestConfig, sl_mult: Optional[pd.Series] = None,
              tp_mult: Optional[pd.Series] = None,
              max_holding: Optional[pd.Series] = None,
-             force_exit: Optional[pd.Series] = None) -> BacktestResult:
+             force_exit: Optional[pd.Series] = None,
+             rho: Optional[pd.Series] = None) -> BacktestResult:
     """Simula la estrategia barra por barra con estado explicito de caja.
 
     Cada barra t se procesa en el orden de docs/SPEC.md, seccion 7:
@@ -341,6 +342,9 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
         True en t-1 y hay posicion, se cierra al open de t pagando comision;
         igual que la señal, se decide en t-1 y se ejecuta en t (sin look-ahead).
         None = nunca se fuerza la salida.
+    rho : pd.Series, opcional
+        Fraccion de capital en riesgo por barra (p. ej. segun el regimen). Se
+        toma de la barra de señal t-1, igual que sl_mult. None = config.rho.
 
     Regresa
     -------
@@ -361,6 +365,7 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
     sl_vals = _per_bar(sl_mult, config.sl_mult, "sl_mult")
     tp_vals = _per_bar(tp_mult, config.tp_mult, "tp_mult")
     holding_vals = _per_bar(max_holding, config.max_holding, "max_holding")
+    rho_vals = _per_bar(rho, config.rho, "rho")
     # Salida forzada por barra; un NaN cuenta como "no forzar".
     if force_exit is None:
         exit_flags = np.zeros(len(df), dtype=bool)
@@ -489,7 +494,7 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
 
         # 3. Entrada al open con la señal y el ATR de la barra anterior.
         if position is None and desired_side != 0 and not np.isnan(atr_vals[t - 1]):
-            q, truncated = compute_sizing(cash, atr_vals[t - 1], opens[t], rho=config.rho,
+            q, truncated = compute_sizing(cash, atr_vals[t - 1], opens[t], rho=rho_vals[t - 1],
                                           sl_mult=sl_vals[t - 1], cost_rate=c)
             if q > 0:
                 side = "long" if desired_side == 1 else "short"

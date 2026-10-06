@@ -64,3 +64,33 @@ def test_signal_uses_only_past_data(name):
     for col in CHECK_COLUMNS:
         assert truncated[col].iloc[-1] == FULL[col].iloc[t], f"{col} en t={t} ({name})"
     assert truncated["atr"].iloc[-1] == pytest.approx(FULL["atr"].iloc[t], nan_ok=True)
+
+
+# --- Truncamiento del backtest completo (señal + motor) -------------------------
+
+from src.backtest import backtest, config_from_params   # noqa: E402
+from src.signals import THETA0                          # noqa: E402
+
+CONFIG = config_from_params(THETA0)
+BACKTEST_T = [8_000, 12_000, 16_000, len(DF) - 1]
+
+
+def _closed_trades(df: pd.DataFrame, t: int) -> pd.DataFrame:
+    """Trades de la estrategia completa sobre df que cerraron antes de la barra t."""
+    features = compute_strategy(df)
+    trades = backtest(df, features["signal"], features["atr"], CONFIG).trades
+    return trades[trades["exit_bar"] < t].reset_index(drop=True)
+
+
+FULL_TRADES = {t: _closed_trades(DF, t) for t in BACKTEST_T}
+
+
+@pytest.mark.parametrize("t", BACKTEST_T)
+def test_backtest_uses_only_past_data(t):
+    """Los trades cerrados antes de t son iguales con df.iloc[:t+1] y con la serie completa."""
+    pd.testing.assert_frame_equal(_closed_trades(DF.iloc[:t + 1], t), FULL_TRADES[t])
+
+
+def test_backtest_truncation_check_is_not_trivial():
+    """Hay trades cerrados antes del ultimo t, asi que la comparacion revisa algo."""
+    assert len(FULL_TRADES[BACKTEST_T[-1]]) > 0
