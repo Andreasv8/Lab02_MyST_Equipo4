@@ -50,7 +50,7 @@ class BacktestConfig:
         Tasa anual de borrow de los shorts sobre el nocional.
     """
 
-    initial_cash: float = 100_000.0
+    initial_cash: float = 1_000_000.0
     rho: float = 0.01
     sl_mult: float = 2.0
     tp_mult: float = 3.0
@@ -147,14 +147,14 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
     c = config.cost_rate
 
     cash = config.initial_cash
-    shares = 0
+    shares = 0.0
     position: Optional[Position] = None
     position_holding = config.max_holding  # holding maximo fijado al entrar
     trades: list[dict] = []
     cash_hist = np.empty(n)
-    shares_hist = np.zeros(n, dtype=int)
+    shares_hist = np.zeros(n, dtype=float)
 
-    def _open(t: int, side: str, q: int, atr_at_entry: float, truncated: bool) -> tuple[Position, float, int]:
+    def _open(t: int, side: str, q: float, atr_at_entry: float, truncated: bool) -> tuple[Position, float, float]:
         """Abre una posicion al open de t; regresa (posicion, delta de caja, shares con signo).
 
         SL y TP usan los multiplos de la barra de señal t-1.
@@ -225,7 +225,7 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
             closed, reason, raw_exit = resolve_open_gap(position, opens[t])
             if closed:
                 cash += _close(position, t, raw_exit, reason, "open")
-                position, shares = None, 0
+                position, shares = None, 0.0
 
         desired_side = int(sig[t - 1])
 
@@ -234,7 +234,7 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
             current_side = 1 if position.side == "long" else -1
             if desired_side != current_side:
                 cash += _close(position, t, opens[t], "opposite_signal", "open")
-                position, shares = None, 0
+                position, shares = None, 0.0
 
         # 3. Entrada al open con la señal y el ATR de la barra anterior.
         if position is None and desired_side != 0 and not np.isnan(atr_vals[t - 1]):
@@ -252,7 +252,7 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
             if closed:
                 phase = "close" if reason == "max_holding" else "intrabar"
                 cash += _close(position, t, raw_exit, reason, phase)
-                position, shares = None, 0
+                position, shares = None, 0.0
 
         cash_hist[t] = cash
         shares_hist[t] = shares
