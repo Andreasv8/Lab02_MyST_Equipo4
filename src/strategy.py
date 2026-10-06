@@ -4,7 +4,7 @@ Los indicadores viven en src/indicators.py (calculados a mano con
 pandas/numpy, sin librerias externas).
 """
 
-import math
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -12,12 +12,12 @@ import pandas as pd
 
 from src.indicators import adx, atr, chaikin_money_flow, roc
 
-COMMISSION_RATE = 0.001
+COMMISSION_RATE = 0.00125
 SLIPPAGE_RATE = 0.0005
 TOTAL_COST_RATE = COMMISSION_RATE + SLIPPAGE_RATE
 
 # Borrow fee de los shorts: tasa anual sobre el nocional, dias calendario / 360.
-BORROW_FEE_ANNUAL = 0.005
+BORROW_FEE_ANNUAL = 0.0
 BORROW_DAY_COUNT = 360
 
 # Umbral de Wilder para considerar que el mercado esta en tendencia.
@@ -51,7 +51,7 @@ class Position:
     """
 
     side: str
-    shares: int
+    shares: float
     entry_price: float
     stop_loss: float
     take_profit: float
@@ -147,7 +147,7 @@ def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
 
 
 def compute_sizing(capital: float, atr_value: float, entry_price: float,
-                   rho: float = 0.01, cost_rate: float = TOTAL_COST_RATE) -> tuple[int, bool]:
+                   rho: float = 0.01, cost_rate: float = TOTAL_COST_RATE) -> tuple[float, bool]:
     """Sizing por risk-parity segun ATR con apalancamiento maximo 1 (SPEC.md, seccion 5).
 
     Q = floor(rho * capital / (2 * ATR)). Si el nocional mas el costo de
@@ -169,14 +169,14 @@ def compute_sizing(capital: float, atr_value: float, entry_price: float,
 
     Regresa
     -------
-    tuple[int, bool]
+    tuple[float, bool]
         (numero de acciones, si se trunco por el tope de apalancamiento).
     """
-    shares = math.floor(rho * capital / (2 * atr_value))
+    shares = rho * capital / (2 * atr_value)
     cost_per_share = entry_price * (1 + cost_rate)
 
     if shares * cost_per_share > capital:
-        return math.floor(capital / cost_per_share), True
+        return capital / cost_per_share, True
     return shares, False
 
 
@@ -310,7 +310,7 @@ def _adjust_exit_price(raw_price: float, side: str, cost_rate: float = TOTAL_COS
     return raw_price * (1 + cost_rate)
 
 
-def run_backtest(df: pd.DataFrame, capital: float = 100_000.0, rho: float = 0.01,
+def run_backtest(df: pd.DataFrame, capital: float = 1_000_000.0, rho: float = 0.01,
                  sl_mult: float = 2.0, tp_mult: float = 3.0, max_holding: int = 10) -> list[dict]:
     """Corre la estrategia completa (entry + exit + sizing) sobre df.
 
