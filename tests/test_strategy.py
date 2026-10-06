@@ -14,6 +14,7 @@ from src.strategy import (
     BORROW_FEE_ANNUAL,
     TOTAL_COST_RATE,
     Position,
+    compute_borrow_fee,
     compute_features,
     compute_sizing,
     compute_win_rate,
@@ -185,20 +186,13 @@ def test_sizing_truncates_with_entry_cost():
     assert shares * entry_price * (1 + TOTAL_COST_RATE) <= capital
 
 
-def test_signal_follows_confluence_rule():
-    """Long exige ROC > 0, CMF > 0 y ADX > 25; short lo espejo; con ADX <= 25 la señal es flat."""
-    df = pd.read_csv(Path(__file__).resolve().parents[1] / "data" / "NVDA_daily.csv",
-                     index_col="Date", parse_dates=True)
-    features = compute_features(df)
-
-    longs = features[features["signal"] == 1]
-    shorts = features[features["signal"] == -1]
-
-    assert len(longs) > 0 and len(shorts) > 0
-    assert ((longs["roc_10"] > 0) & (longs["cmf_20"] > 0) & (longs["adx_14"] > ADX_THRESHOLD)).all()
-    assert ((shorts["roc_10"] < 0) & (shorts["cmf_20"] < 0) & (shorts["adx_14"] > ADX_THRESHOLD)).all()
-    assert (features.loc[~(features["adx_14"] > ADX_THRESHOLD), "signal"] == 0).all()
-
+def test_borrow_fee_formula_by_calendar_days():
+    """Formula del costo de prestamo con una tasa explicita: viernes a lunes = 3 dias."""
+    fee = compute_borrow_fee("short", 10, 100.0, pd.Timestamp("2024-01-05"),
+                            pd.Timestamp("2024-01-08"), fee_annual=0.005)
+    assert fee == pytest.approx(0.005 * 10 * 100.0 * 3 / BORROW_DAY_COUNT)
+    assert compute_borrow_fee("long", 10, 100.0, pd.Timestamp("2024-01-05"),
+                            pd.Timestamp("2024-01-08"), fee_annual=0.005) == 0.0
 
 def test_short_pays_borrow_fee_by_calendar_days(monkeypatch):
     """Un short abierto el viernes y cerrado el lunes paga 3 dias de borrow fee."""

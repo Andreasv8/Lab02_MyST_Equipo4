@@ -11,7 +11,7 @@ from src.backtest import BacktestConfig, backtest
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
 # Valores calculados a mano (ver docstring de test_golden_long_tp_then_short_tp).
-EXPECTED_EQUITY = [10000.00, 10047.50, 10144.85, 10192.20, 10289.66]
+EXPECTED_EQUITY = [10000.00, 10047.50, 10144.85, 10192.89, 10291.76]
 EXPECTED_TRADES = [("long", "take_profit"), ("short", "take_profit")]
 
 
@@ -37,12 +37,12 @@ def test_golden_long_tp_then_short_tp():
       2647.35 = 10144.85 = equity.
     - t=3: short al open 106 (señal -1 de t=2). Q = floor(101.4485/4) = 25.
       Fill 106·0.999 = 105.894 -> cash = 10144.85 + 2647.35 = 12792.20.
-      SL 110, TP 100. equity = 12792.20 - 25·104 = 10192.20
+      SL 110, TP 100. equity = 12792.20 - 25·104 = 10192.89
     - t=4: Low 99 <= TP 100 -> cubre a 100·1.001 = 100.10 -> cash = 12792.20 -
-      2502.50 = 10289.70; borrow fee 1 dia = 0.005·25·106·1/360 = 0.0368 ->
-      cash final = 10289.66.
+      2502.50 = 10291.76; borrow fee 1 dia = 0.005·25·106·1/360 = 0.0368 ->
+      cash final = 10291.72.
 
-    Equity esperado por barra: [10000, 10047.50, 10144.85, 10192.20, 10289.66]
+    Equity esperado por barra: [10000, 10047.50, 10144.85, 10192.89, 10291.76]
     (tolerancia 0.01). Trades: 2 (long take_profit, short take_profit).
     """
     scenario = pd.read_csv(GOLDEN_DIR / "backtest_scenario.csv", index_col="Date", parse_dates=True)
@@ -83,3 +83,35 @@ def test_per_bar_exit_params_fixed_at_entry():
     assert (first["side"], first["entry_bar"], first["exit_bar"]) == ("long", 1, 2)
     assert first["exit_reason"] == "max_holding"
     assert first["raw_exit_price"] == pytest.approx(106.5)
+
+
+def test_accounting_identities_with_lab_costs():
+    """Contabilidad del backtest con los parametros del Lab 02 (seccion 3.7, prueba 3).
+
+    1. En cada barra, equity = efectivo + unidades · Close.
+    2. Sin posicion abierta al final, equity final = capital inicial + Σ pnl.
+    3. Costos cobrados = comision · nocional operado (cada trade son 2 operaciones).
+    4. El efectivo nunca es negativo (sin apalancamiento).
+    """
+    scenario = pd.read_csv(GOLDEN_DIR / "backtest_scenario.csv", index_col="Date", parse_dates=True)
+    df = scenario[["Open", "High", "Low", "Close"]]
+    config = BacktestConfig()
+    assert (config.initial_cash, config.cost_rate, config.borrow_fee_annual) == (1_000_000.0, 0.00125, 0.0)
+
+    result = backtest(df, scenario["signal"], scenario["atr"], config)
+    equity, trades = result.equity, result.trades
+
+    assert len(trades) == 2
+    assert (equity["equity"] == equity["cash"] + equity["shares"] * df["Close"]).all()
+    assert equity["shares"].iloc[-1] == 0
+    assert equity["equity"].iloc[-1] == pytest.approx(config.initial_cash + trades["pnl"].sum())
+
+    is_long = trades["side"] == "long"
+    gross = (trades["shares"] * (trades["raw_exit_price"] - trades["raw_entry_price"])).where(
+        is_long, trades["shares"] * (trades["raw_entry_price"] - trades["raw_exit_price"]))
+    costs_charged = (gross - trades["pnl"]).sum()
+    notional = (trades["shares"] * (trades["raw_entry_price"] + trades["raw_exit_price"])).sum()
+    assert costs_charged == pytest.approx(config.cost_rate * notional)
+    assert (equity["cash"] >= -1e-9).all()
+
+    

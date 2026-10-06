@@ -17,17 +17,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from lab_02.src.data import load_btc
 from src.backtest import BacktestConfig, backtest
 from src.splits import SPLITS
 from src.strategy import compute_features
 
-TEST_END = SPLITS["test"][1]
-DF = pd.read_csv(Path(__file__).resolve().parents[1] / "data" / "NVDA_daily.csv",
-                 index_col="Date", parse_dates=True).loc[:TEST_END]
+DF = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")).iloc[:5000]
 
 # Cada 40 barras desde la 60, mas la ultima barra.
 T_BARS = list(range(60, len(DF), 40)) + [len(DF) - 1]
-FEATURE_COLS = ["roc_10", "cmf_20", "adx_14", "atr_14", "signal"]
+FEATURE_COLS = ["roc", "macd_hist", "plus_di", "minus_di", "adx", "atr_14",
+                "vote_roc", "vote_macd", "vote_adx", "signal"]
 ATOL = 1e-9
 
 

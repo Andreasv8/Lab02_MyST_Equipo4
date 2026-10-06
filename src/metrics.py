@@ -310,7 +310,7 @@ def buy_and_hold_equity(df: pd.DataFrame, initial_cash: float, cost_rate: float)
         cash, shares y equity por barra (mismo formato que backtest().equity).
     """
     entry_cost = df["Open"].iloc[0] * (1 + cost_rate)
-    q = math.floor(initial_cash / entry_cost)
+    q = initial_cash / entry_cost
     cash = initial_cash - q * entry_cost
     return pd.DataFrame({
         "cash": cash,

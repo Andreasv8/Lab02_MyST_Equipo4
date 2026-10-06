@@ -15,7 +15,7 @@ from sklearn.metrics import silhouette_score
 from src.regimes import (
     REGIME_COLUMNS,
     REGIME_NAMES,
-    TRADING_DAYS,
+    PERIODS_PER_YEAR,
     RegimeModels,
     RegimeScaler,
     apply_scaler,
@@ -27,7 +27,7 @@ from src.splits import SPLITS
 
 METHODS = ["rules", "kmeans", "hmm"]
 DEFAULT_PERIODS = {"train": SPLITS["train"], "test": SPLITS["test"]}
-BARS_PER_MONTH = 21
+BARS_PER_MONTH = 288*30
 
 
 def _clean(labels: Iterable) -> pd.Series:

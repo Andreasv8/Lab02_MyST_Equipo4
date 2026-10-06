@@ -1,8 +1,11 @@
 """Features y clasificadores de regimen de mercado de lab_02 (Act 07).
 
-Tres features con ventana movil de 63 dias (~un trimestre de sesiones),
-recalculadas a diario. Todas son causales: el valor en la barra t solo usa
+Tres features con ventana movil de WINDOW barras de 5 minutos (una semana),
+calculadas en cada barra. Todas son causales: el valor en la barra t solo usa
 datos hasta t (ver tests/test_regimes.py).
+
+Los clasificadores trabajan en las barras hh:00 (hourly): se ajustan y
+etiquetan una vez por hora, y la etiqueta se mantiene el resto de la hora.
 
 El escalado se ajusta SOLO con train (fit_scaler) y se aplica igual a
 cualquier periodo (apply_scaler).
@@ -22,15 +25,17 @@ from scipy.special import logsumexp
 from scipy.stats import multivariate_normal
 from sklearn.cluster import KMeans
 
+from src.metrics import BARS_PER_DAY, PERIODS_PER_YEAR
 from src.splits import get_split
 
 TRADING_DAYS = 252
+WINDOW = 7 * BARS_PER_DAY               # una semana de barras de 5 minutos
 REGIME_COLUMNS = ["volatility", "trend_r2", "autocorr_1"]
 REGIME_NAMES = ["crisis", "trend", "mean_reversion"]
 SEED = 42
 N_REGIMES = 3
 
-MIN_DURATION = 5
+MIN_DURATION = 12                       # pasos del HMM = horas
 HMM_SEEDS = range(10)
 TRANSMAT_PRIOR_WEIGHT = 50
 
@@ -40,15 +45,15 @@ def log_returns(close: pd.Series) -> pd.Series:
     return np.log(close / close.shift(1))
 
 
-def rolling_volatility(close: pd.Series, window: int = 63) -> pd.Series:
+def rolling_volatility(close: pd.Series, window: int = WINDOW) -> pd.Series:
     """Volatilidad anualizada de los rendimientos log en la ventana.
 
-    sigma_t = std(r_{t-N+1}, ..., r_t) * sqrt(252), con ddof=1.
+    sigma_t = std(r_{t-N+1}, ..., r_t) * sqrt(PERIODS_PER_YEAR), con ddof=1.
 
     Por que: el nivel de volatilidad es la variable que mas separa regimenes
     (calma vs estres); cambia el tamaño de los movimientos y el riesgo por trade.
     """
-    return log_returns(close).rolling(window=window).std(ddof=1) * np.sqrt(TRADING_DAYS)
+    return log_returns(close).rolling(window=window).std(ddof=1) * np.sqrt(PERIODS_PER_YEAR)
 
 
 def _r2_vs_time(y: np.ndarray) -> float:
@@ -62,7 +67,7 @@ def _r2_vs_time(y: np.ndarray) -> float:
     return np.dot(x_c, y_c) ** 2 / (np.dot(x_c, x_c) * ss_y)
 
 
-def rolling_trend_r2(close: pd.Series, window: int = 63) -> pd.Series:
+def rolling_trend_r2(close: pd.Series, window: int = WINDOW) -> pd.Series:
     """R^2 de la regresion lineal del log-precio contra el tiempo en la ventana.
 
     En los N log-precios y = ln(C) de la ventana, ajusta y = a + b*x con
@@ -86,7 +91,7 @@ def _lag1_corr(r: np.ndarray) -> float:
     return np.dot(a_c, b_c) / denom
 
 
-def rolling_autocorr_1(close: pd.Series, window: int = 63) -> pd.Series:
+def rolling_autocorr_1(close: pd.Series, window: int = WINDOW) -> pd.Series:
     """Autocorrelacion lag-1 de los rendimientos log en la ventana.
 
     Con los N rendimientos de la ventana, rho_1 = corr(r_{k-1}, r_k) sobre los
@@ -99,7 +104,7 @@ def rolling_autocorr_1(close: pd.Series, window: int = 63) -> pd.Series:
     return log_returns(close).rolling(window=window).apply(_lag1_corr, raw=True)
 
 
-def regime_features(df: pd.DataFrame, window: int = 63) -> pd.DataFrame:
+def regime_features(df: pd.DataFrame, window: int = WINDOW) -> pd.DataFrame:
     """Calcula las 3 features de regimen sobre un DataFrame de precios.
 
     Parametros
@@ -107,7 +112,7 @@ def regime_features(df: pd.DataFrame, window: int = 63) -> pd.DataFrame:
     df : pd.DataFrame
         Debe incluir la columna "Close".
     window : int
-        Tamaño de la ventana movil en barras (63 por defecto).
+        Tamaño de la ventana movil en barras (WINDOW por defecto).
 
     Regresa
     -------
@@ -121,6 +126,23 @@ def regime_features(df: pd.DataFrame, window: int = 63) -> pd.DataFrame:
         "trend_r2": rolling_trend_r2(close, window),
         "autocorr_1": rolling_autocorr_1(close, window),
     }, index=df.index)
+
+
+def hourly(features: pd.DataFrame) -> pd.DataFrame:
+    """Filas de las barras hh:00: el paso de tiempo de los clasificadores.
+
+    Por que: con barras de 5 minutos el HMM cambiaria de estado por ruido;
+    a una hora por paso las duraciones esperadas son interpretables.
+    """
+    return features[features.index.minute == 0]
+
+
+def _to_bars(labels: pd.Series, index: pd.Index) -> pd.Series:
+    """Lleva etiquetas horarias a todas las barras: cada barra toma la de la ultima hh:00 <= t.
+
+    Es causal: la barra t solo ve la etiqueta de una hora ya cerrada en t.
+    """
+    return labels.reindex(index, method="ffill")
 
 
 @dataclass(frozen=True)
@@ -342,7 +364,7 @@ def _fit_hmm_best_seed(x_train: np.ndarray, covariance_type: str,
 
 
 def _durations_ok(model: GaussianHMM) -> bool:
-    """True si todas las duraciones esperadas son >= MIN_DURATION barras."""
+    """True si todas las duraciones esperadas son >= MIN_DURATION pasos (horas)."""
     return bool((1 / (1 - np.diag(model.transmat_)) >= MIN_DURATION).all())
 
 
@@ -361,12 +383,12 @@ def fit_hmm(features_train: pd.DataFrame,
 
     1. covariance_type="full", 10 semillas (0..9), se queda el de mayor
        log-likelihood en train (model.score). Si todas las duraciones
-       esperadas son >= 5 barras, se usa ese.
+       esperadas son >= MIN_DURATION horas, se usa ese.
     2. Si no, covariance_type="diag" con el mismo criterio.
     3. Si no, "diag" + transmat_prior Dirichlet = 1 + 50*I: supuesto a priori
        de que los regimenes persisten (mas peso en la diagonal de A).
 
-    Con NVDA (train 2021-09-15 a 2024-09-14) queda la opcion 1.
+    features_train debe venir ya en pasos horarios (hourly).
 
     Regresa
     -------
@@ -509,8 +531,8 @@ class RegimeModels:
 def fit_regime_models(df: pd.DataFrame) -> RegimeModels:
     """Ajusta scaler, umbral de reglas, K-means y HMM SOLO con las barras de train.
 
-    Las features se calculan sobre df (son causales) y luego se recortan a
-    train con src/splits.py.
+    Las features se calculan sobre df (son causales), se recortan a train con
+    src/splits.py y se toman solo las barras hh:00 (hourly).
 
     Parametros
     ----------
@@ -522,7 +544,7 @@ def fit_regime_models(df: pd.DataFrame) -> RegimeModels:
     RegimeModels
         Modelos y parametros ajustados.
     """
-    features_train = get_split(regime_features(df), "train")
+    features_train = hourly(get_split(regime_features(df), "train"))
     scaler = fit_scaler(features_train)
     kmeans, kmeans_names = fit_kmeans(features_train, scaler)
     hmm, hmm_names, hmm_choice = fit_hmm(features_train, scaler)
@@ -537,12 +559,15 @@ def regime_labels(df: pd.DataFrame, models: RegimeModels) -> pd.DataFrame:
     -------
     pd.DataFrame
         Indice de df; columnas rules, kmeans, hmm (filtradas, causales) y
-        hmm_viterbi (con look-ahead, solo para comparar). NaN en warm-up.
+        hmm_viterbi (con look-ahead, solo para comparar). Se clasifica en las
+        barras hh:00 y la etiqueta se mantiene hasta la siguiente hora.
+        NaN en warm-up y antes de la primera hh:00 con features.
     """
-    features = regime_features(df)
-    return pd.DataFrame({
+    features = hourly(regime_features(df))
+    labels = pd.DataFrame({
         "rules": classify_rules(features, models.vol_threshold),
         "kmeans": classify_kmeans(features, models.scaler, models.kmeans, models.kmeans_names),
         "hmm": classify_hmm_filtered(features, models.scaler, models.hmm, models.hmm_names),
         "hmm_viterbi": classify_hmm_viterbi(features, models.scaler, models.hmm, models.hmm_names),
-    }, index=df.index)
+    }, index=features.index)
+    return labels.apply(_to_bars, index=df.index)

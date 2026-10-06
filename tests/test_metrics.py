@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest import BacktestConfig
 from src.metrics import (
+    PERIODS_PER_YEAR,
     buy_and_hold_equity,
     cagr,
     calmar_ratio,
@@ -24,8 +25,8 @@ from src.metrics import (
     win_rate_stats,
 )
 
-SQRT_252 = math.sqrt(252)
-
+PPY = PERIODS_PER_YEAR
+SQRT_PPY = math.sqrt(PPY)
 
 def _dates(n: int) -> pd.DatetimeIndex:
     return pd.date_range("2024-01-01", periods=n, freq="B")
@@ -48,8 +49,8 @@ def test_returns_drawdown_cagr_calmar_by_hand():
     assert max_drawdown(equity) == pytest.approx(-0.10)
 
     expected_cagr = 1.21 ** (252 / 3) - 1
-    assert cagr(equity) == pytest.approx(expected_cagr)
-    assert calmar_ratio(equity) == pytest.approx(expected_cagr / 0.10)
+    assert cagr(equity, periods=3) == pytest.approx(0.21)        
+    assert calmar_ratio(equity, periods=3) == pytest.approx(2.1)   
 
 
 def test_sharpe_and_sortino_by_hand():
@@ -123,9 +124,9 @@ def test_buy_and_hold_by_hand():
 
     bh = buy_and_hold_equity(df, initial_cash=10_000, cost_rate=0.001)
 
-    assert (bh["shares"] == 99).all()
-    assert bh["cash"].iloc[0] == pytest.approx(90.10)
-    assert bh["equity"].tolist() == pytest.approx([9990.10, 10980.10, 9000.10])
+    assert bh["shares"].tolist() == pytest.approx([10_000 / 100.1] * 3)
+    assert bh["cash"].iloc[0] == pytest.approx(0.0)
+    assert bh["equity"].tolist() == pytest.approx([9990.01, 10989.01, 8991.01], abs=0.01)
 
 
 def test_summarize_sub_period_rebases_and_filters_trades():
@@ -150,7 +151,7 @@ def test_summarize_sub_period_rebases_and_filters_trades():
 
     assert summary["equity_final"] == pytest.approx(9900.0)
     assert summary["max_drawdown"] == pytest.approx(-0.10)
-    assert summary["cagr"] == pytest.approx(0.99 ** (252 / 2) - 1)
+    assert summary["total_return"] == pytest.approx(-0.01)
     assert summary["n_trades"] == 1
     assert summary["avg_pnl"] == pytest.approx(8.0)
     assert summary["exposure"] == pytest.approx(2 / 3)
