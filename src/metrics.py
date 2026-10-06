@@ -14,7 +14,8 @@ import pandas as pd
 
 from src.strategy import compute_win_rate
 
-PERIODS_PER_YEAR = 252
+BARS_PER_DAY = 288                      # 24 h x 12 barras de 5 minutos
+PERIODS_PER_YEAR = BARS_PER_DAY * 365
 
 
 def _years(equity: pd.Series, periods: int = PERIODS_PER_YEAR) -> float:
