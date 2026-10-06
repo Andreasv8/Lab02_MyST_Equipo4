@@ -1,6 +1,6 @@
 """Optimizacion de parametros de la estrategia de lab_02 (Act 07, punto 7).
 
-θ = (roc_window, cmf_window, adx_threshold, sl_mult, rr, max_holding), con
+θ = (ma_slow, donchian_window, atr_mult, sl_mult, rr, max_holding), con
 tp_mult = sl_mult · rr. ATR(14), ρ = 1% y costos quedan FIJOS: no son
 parametros de la señal.
 
@@ -32,53 +32,57 @@ N_STARTUP_TRIALS = 150
 MIN_TRADES = 20          # θ* unico
 MIN_TRADES_REGIME = 10   # θ*_j por regimen
 
-# Parametros del SPEC (Act 06): ROC 10, CMF 20, ADX > 25, SL 2·ATR, TP 3·ATR (rr 1.5), holding 10.
+# Parametros base, en barras de 5 minutos: EMA lenta y Donchian de 1 dia (288), banda de
+# 3 ATR, SL 12·ATR, TP 24·ATR (rr 2), holding maximo 1 dia.
 THETA0 = {
-    "roc_window": 10,
-    "macd_fast": 12,
-    "macd_slow": 26,
-    "macd_signal": 9,
-    "adx_threshold": 25.0,
-    "sl_mult": 2.0,
-    "rr": 1.5,
-    "max_holding": 10,
+    "ma_slow": 288,
+    "donchian_window": 288,
+    "atr_mult": 3.0,
+    "sl_mult": 12.0,
+    "rr": 2.0,
+    "max_holding": 288,
 }
 
 # Espacio de busqueda: nombre -> (tipo, minimo, maximo).
+# Escala: el ATR(14) de 5 minutos mide ~0.08% del precio y la comision de ida y vuelta
+# es 0.25%. Con SL/TP de 1 a 3 ATR ningun trade puede cubrir la comision, asi que las
+# salidas se buscan entre 4 y 30 ATR y las ventanas entre 4 horas y 4 dias.
 PARAM_SPACE = {
-    "roc_window": ("int", 5, 30),
-    "macd_fast": ("int", 5, 20),
-    "macd_slow": ("int", 20, 40),
-    "macd_signal": ("int", 5, 20),
-    "adx_threshold": ("float", 15.0, 35.0),
-    "sl_mult": ("float", 1.0, 3.0),
-    "rr": ("float", 1.0, 3.0),
-    "max_holding": ("int", 5, 20),
+    "ma_slow": ("int", 48, 1152),          # 4 horas a 4 dias
+    "donchian_window": ("int", 48, 1152),  # 4 horas a 4 dias
+    "atr_mult": ("float", 1.0, 8.0),
+    "sl_mult": ("float", 4.0, 30.0),
+    "rr": ("float", 1.0, 4.0),
+    "max_holding": ("int", 36, 864),       # 3 horas a 3 dias
 }
 
 # Metricas de summarize que suponen un sl/tp escalar (no aplican si cambian por regimen).
 SCALAR_EXIT_METRICS = ["p_star", "p_star_cost", "k_mean"]
 
-def macd_windows(macd_slow: int) -> tuple[int, int, int]:
-    """Ventanas (rapida, lenta, señal) del MACD con las proporciones clasicas 12/26/9.
 
-    Ejemplo: macd_slow = 26 -> (12, 26, 9); macd_slow = 52 -> (24, 52, 18).
+def ma_windows(ma_slow: int) -> tuple[int, int]:
+    """Ventanas (rapida, lenta) de las medias moviles: la rapida es 1/4 de la lenta.
+
+    Ejemplo: ma_slow = 48 -> (12, 48); ma_slow = 288 -> (72, 288).
     """
-    return max(2, round(macd_slow * 12 / 26)), macd_slow, max(2, round(macd_slow * 9 / 26))
+    return max(2, round(ma_slow / 4)), ma_slow
 
 
 def theta_signal(df: pd.DataFrame, theta: dict) -> tuple[pd.Series, pd.Series]:
-    """Señal de confluencia con las ventanas/umbral de θ y el ATR(14) fijo.
+    """Señal de confirmacion 2 de 3 con las ventanas/umbral de θ y el ATR(14) fijo.
+
+    Las medias moviles se controlan con un solo parametro, ma_slow: la EMA
+    rapida siempre es 1/4 de la lenta (ma_windows).
 
     Regresa
     -------
     tuple[pd.Series, pd.Series]
         (señal 1/-1/0 por barra, ATR(14) por barra).
     """
-    macd_fast, macd_slow, macd_signal = macd_windows(int(theta["macd_slow"]))
-    features = compute_features(df, roc_window=int(theta["roc_window"]),
-                                macd_fast=macd_fast, macd_slow=macd_slow, macd_signal=macd_signal,
-                                adx_threshold=theta["adx_threshold"])
+    fast, slow = ma_windows(int(theta["ma_slow"]))
+    features = compute_features(df, ma_fast=fast, ma_slow=slow,
+                                donchian_window=int(theta["donchian_window"]),
+                                atr_mult=theta["atr_mult"])
     return features["signal"], features["atr_14"]
 
 
