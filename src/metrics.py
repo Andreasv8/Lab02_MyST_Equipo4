@@ -12,6 +12,7 @@ from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
+from scipy.stats import kruskal
 
 from src.backtest import backtest, compute_win_rate, config_from_params
 from src.signals import compute_strategy
@@ -480,3 +481,107 @@ def break_even_cost(bps: pd.Series, sharpe: pd.Series) -> float:
         if s[i] <= 0:
             return b[i - 1] + s[i - 1] * (b[i] - b[i - 1]) / (s[i - 1] - s[i])
     return np.nan
+
+
+# ---------------------------------------------------------------------------
+# Analisis de trades: por regimen y diagnostico (docs/SPEC.md, seccion 14.4)
+# ---------------------------------------------------------------------------
+
+def trade_returns(trades: pd.DataFrame) -> pd.Series:
+    """Retorno de cada trade: pnl neto / nocional de entrada (unidades · precio crudo)."""
+    return trades["pnl"] / (trades["shares"] * trades["raw_entry_price"])
+
+
+def bootstrap_mean_ci(values, n_boot: int = 10_000, seed: int = 42) -> tuple[float, float]:
+    """Intervalo de confianza del 95% de la media con bootstrap.
+
+    Remuestrea con reemplazo n_boot veces, calcula la media de cada muestra y
+    toma los percentiles 2.5 y 97.5. NaN si hay menos de 2 valores.
+    """
+    values = np.asarray(values, dtype=float)
+    if len(values) < 2:
+        return np.nan, np.nan
+    rng = np.random.default_rng(seed)
+    means = rng.choice(values, size=(n_boot, len(values)), replace=True).mean(axis=1)
+    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+
+def regime_trade_stats(trades: pd.DataFrame, regimes: pd.Series) -> pd.DataFrame:
+    """Metricas de los trades agrupados por regimen de entrada.
+
+    Recibe los trades y el regimen de entrada de cada trade (mismo indice).
+    Regresa una tabla por regimen con n_trades, win_rate (%), mean_return
+    (retorno promedio por trade) y su IC bootstrap del 95% (ci_low, ci_high).
+    """
+    rets = trade_returns(trades)
+    rows = {}
+    for regime in sorted(regimes.dropna().unique()):
+        r = rets[regimes == regime]
+        ci_low, ci_high = bootstrap_mean_ci(r)
+        rows[regime] = {"n_trades": len(r), "win_rate": 100 * (r > 0).mean(), "mean_return": r.mean(),
+                        "ci_low": ci_low, "ci_high": ci_high}
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("regime")
+
+
+def kruskal_by_regime(trades: pd.DataFrame, regimes: pd.Series) -> dict:
+    """Prueba de Kruskal-Wallis: ¿los retornos por trade difieren entre regimenes?
+
+    Usa los regimenes con al menos 2 trades. Regresa {"h", "p_value", "groups"};
+    NaN si hay menos de 2 grupos.
+    """
+    rets = trade_returns(trades)
+    groups = [rets[regimes == r].to_numpy() for r in sorted(regimes.dropna().unique())]
+    groups = [g for g in groups if len(g) >= 2]
+    if len(groups) < 2:
+        return {"h": np.nan, "p_value": np.nan, "groups": len(groups)}
+    h, p_value = kruskal(*groups)
+    return {"h": float(h), "p_value": float(p_value), "groups": len(groups)}
+
+
+def _group_table(trades: pd.DataFrame, column: str) -> pd.DataFrame:
+    """Numero de trades, win rate (%) y PnL total agrupando por una columna."""
+    grouped = trades.groupby(column)["pnl"]
+    return pd.DataFrame({
+        "n_trades": grouped.size(),
+        "win_rate": grouped.apply(lambda pnl: 100 * (pnl > 0).mean()),
+        "total_pnl": grouped.sum(),
+    })
+
+
+def exit_reason_table(trades: pd.DataFrame) -> pd.DataFrame:
+    """Trades por motivo de salida (stop_loss, take_profit, max_holding, ...)."""
+    return _group_table(trades, "exit_reason")
+
+
+def side_table(trades: pd.DataFrame) -> pd.DataFrame:
+    """Trades largos contra cortos."""
+    return _group_table(trades, "side")
+
+
+def pnl_breakdown(trades: pd.DataFrame) -> pd.Series:
+    """De donde viene el PnL: bruto, costos y neto; payoff y win rate de break-even.
+
+    pnl_bruto = pnl neto + comisiones + slippage + borrow fee.
+    payoff = ganancia promedio / perdida promedio (en valor absoluto).
+    win rate de break-even = 1 / (1 + payoff): con ese % de aciertos, las
+    ganancias pagan justo las perdidas.
+    """
+    pnl = trades["pnl"]
+    commissions = (trades["entry_commission"] + trades["exit_commission"]).sum()
+    slippage = (trades["entry_slippage"] + trades["exit_slippage"]).sum()
+    borrow = trades["borrow_fee"].sum()
+    avg_win = pnl[pnl > 0].mean()
+    avg_loss = -pnl[pnl < 0].mean()
+    payoff = avg_win / avg_loss
+    return pd.Series({
+        "gross_pnl": pnl.sum() + commissions + slippage + borrow,
+        "commissions": commissions,
+        "slippage": slippage,
+        "borrow_fee": borrow,
+        "net_pnl": pnl.sum(),
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff": payoff,
+        "win_rate": 100 * (pnl > 0).mean(),
+        "break_even_win_rate": 100 / (1 + payoff),
+    })

@@ -82,3 +82,37 @@ def test_confirmation_rule_two_of_three(votes, expected):
     assert MIN_VOTES == 2
     votes_df = pd.DataFrame([votes], columns=["vote_ema", "vote_roc", "vote_bb"])
     assert confirmation_signal(votes_df).iloc[0] == expected
+
+
+# --- Opcion de un solo voto (robustez, SPEC 14.3) ------------------------------
+
+from src.data import load_train                         # noqa: E402
+from src.signals import THETA0, compute_strategy, strategy_features_4h   # noqa: E402
+
+DF_SHORT = load_train().iloc[:20_000]
+
+
+@pytest.mark.parametrize("vote", ["ema", "roc", "bb"])
+def test_single_vote_state_follows_that_vote_with_adx_filter(vote):
+    """Con un solo voto, el estado es ese voto cuando ADX > umbral, y 0 si no."""
+    features = strategy_features_4h(DF_SHORT, THETA0, single_vote=vote)
+    strong = features["adx"] > THETA0["adx_threshold"]
+    expected = features[f"vote_{vote}"].where(strong, 0)
+    assert (features["state"] == expected).all()
+
+
+def test_single_vote_signal_only_on_state_change():
+    """La señal de un solo voto tambien aparece solo cuando cambia el estado."""
+    strategy = compute_strategy(DF_SHORT, THETA0, single_vote="roc")
+    previous = strategy["state"].shift(1, fill_value=0)
+    changed = strategy["state"] != previous
+    assert (strategy.loc[changed, "signal"] == strategy.loc[changed, "state"]).all()
+    assert (strategy.loc[~changed, "signal"] == 0).all()
+
+
+def test_default_is_two_of_three():
+    """Sin single_vote se usa la regla 2 de 3 de siempre."""
+    features = strategy_features_4h(DF_SHORT, THETA0)
+    votes = features[["vote_ema", "vote_roc", "vote_bb"]]
+    expected = confirmed_state(votes, features["adx"], THETA0["adx_threshold"])
+    assert (features["state"] == expected).all()

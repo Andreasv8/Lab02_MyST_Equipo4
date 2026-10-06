@@ -11,20 +11,27 @@ from src.backtest import BacktestConfig
 from src.data import load_train
 from src.metrics import (
     PERIODS_PER_YEAR,
+    bootstrap_mean_ci,
     break_even_cost,
     buy_and_hold_equity,
     cagr,
     calmar_ratio,
     cost_sensitivity,
     drawdown_series,
+    exit_reason_table,
     exposure,
+    kruskal_by_regime,
     max_drawdown,
     performance_summary,
+    pnl_breakdown,
+    regime_trade_stats,
     returns,
     returns_table,
+    side_table,
     sharpe_ratio,
     sortino_ratio,
     summarize,
+    trade_returns,
     trade_stats,
     turnover_stats,
     win_rate_stats,
@@ -233,3 +240,72 @@ def test_returns_table_by_hand():
     assert monthly.tolist() == pytest.approx([0.10, 0.10, 100 / 121 - 1])
     assert returns_table(equity, "QE").tolist() == pytest.approx([0.0])
     assert returns_table(equity, "YE").index[0] == pd.Timestamp("2023-12-31")
+
+
+# --- Analisis de trades (SPEC 14.4) y diagnostico -------------------------------
+
+TRADES = pd.DataFrame({
+    "side": ["long", "long", "short", "short"],
+    "exit_reason": ["take_profit", "stop_loss", "take_profit", "stop_loss"],
+    "shares": [10.0, 10.0, 5.0, 5.0],
+    "raw_entry_price": [100.0, 100.0, 200.0, 200.0],
+    "pnl": [30.0, -10.0, 20.0, -20.0],
+    "entry_commission": [1.0, 1.0, 1.0, 1.0],
+    "exit_commission": [1.0, 1.0, 1.0, 1.0],
+    "entry_slippage": 0.0, "exit_slippage": 0.0, "borrow_fee": 0.0,
+})
+
+
+def test_trade_returns_on_entry_notional():
+    """Retorno = pnl / (unidades · precio de entrada): 30/1000 = 3%, -20/1000 = -2%."""
+    assert trade_returns(TRADES).tolist() == pytest.approx([0.03, -0.01, 0.02, -0.02])
+
+
+def test_bootstrap_ci_constant_and_reproducible():
+    """Valores constantes -> IC de un solo punto; con semilla fija el IC se repite."""
+    assert bootstrap_mean_ci([0.5, 0.5, 0.5]) == (0.5, 0.5)
+    values = [0.1, -0.2, 0.3, 0.05, -0.1]
+    low, high = bootstrap_mean_ci(values)
+    assert (low, high) == bootstrap_mean_ci(values)
+    assert low <= sum(values) / len(values) <= high
+    assert all(math.isnan(v) for v in bootstrap_mean_ci([0.1]))
+
+
+def test_regime_trade_stats_and_kruskal():
+    """Por regimen: n, win rate y media. Kruskal: grupos separados -> p bajo; iguales -> p alto."""
+    regimes = pd.Series(["trend", "trend", "crisis", "crisis"])
+    stats = regime_trade_stats(TRADES, regimes)
+    assert stats.loc["trend", "n_trades"] == 2
+    assert stats.loc["trend", "win_rate"] == 50.0
+    assert stats.loc["trend", "mean_return"] == pytest.approx(0.01)
+
+    n = 30
+    separated = pd.DataFrame({"pnl": [1.0] * n + [-1.0] * n, "shares": 1.0, "raw_entry_price": 1.0})
+    groups = pd.Series(["a"] * n + ["b"] * n)
+    assert kruskal_by_regime(separated, groups)["p_value"] < 0.001
+    same = pd.DataFrame({"pnl": [1.0, -1.0] * n, "shares": 1.0, "raw_entry_price": 1.0})
+    assert kruskal_by_regime(same, groups)["p_value"] > 0.5
+
+
+def test_exit_reason_and_side_tables():
+    """Agrupa trades, win rate (%) y PnL total por motivo de salida y por lado."""
+    by_exit = exit_reason_table(TRADES)
+    assert by_exit.loc["take_profit", "total_pnl"] == 50.0
+    assert by_exit.loc["stop_loss", "win_rate"] == 0.0
+    by_side = side_table(TRADES)
+    assert by_side.loc["long", "n_trades"] == 2
+    assert by_side.loc["short", "total_pnl"] == 0.0
+
+
+def test_pnl_breakdown_by_hand():
+    """Neto 20; comisiones 8 -> bruto 28. Ganancia prom. 25, perdida prom. 15 -> payoff 5/3.
+
+    Win rate de break-even = 1 / (1 + 5/3) = 37.5%; win rate real = 50%.
+    """
+    diag = pnl_breakdown(TRADES)
+    assert diag["net_pnl"] == 20.0
+    assert diag["commissions"] == 8.0
+    assert diag["gross_pnl"] == 28.0
+    assert diag["payoff"] == pytest.approx(25 / 15)
+    assert diag["break_even_win_rate"] == pytest.approx(37.5)
+    assert diag["win_rate"] == 50.0
