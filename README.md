@@ -58,7 +58,6 @@ python -m pytest -q
 │   ├── btc_project_train.csv
 │   └── btc_project_test.csv
 ├── docs/
-│   ├── ACT07_ROBUST.md
 │   └── SPEC.md
 ├── notebooks/
 │   └── analysis.ipynb
@@ -80,16 +79,19 @@ python -m pytest -q
 └── tests/
     ├── golden/
     │   └── backtest_scenario.csv
+    ├── test_accounting.py
     ├── test_analysis.py
     ├── test_backtest.py
+    ├── test_causality.py
+    ├── test_confirmation.py
     ├── test_ema_adx.py
+    ├── test_execution.py
     ├── test_metrics.py
     ├── test_optimization.py
     ├── test_regime_analysis.py
     ├── test_regimes.py
     ├── test_robust_evaluation.py
     ├── test_signals.py
-    ├── test_strategy.py
     ├── test_truncation.py
     └── test_walk_forward.py
 ```

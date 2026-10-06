@@ -1,99 +1,142 @@
-# SPEC — Lab 02: Trading Strategy Skeleton (NVDA)
+# SPEC — Estrategia del Lab 02 (BTCUSDT 5 min, Nivel B)
 
-## 1. Universe and frequency
-- Activo: NVDA, barras diarias (1d), yfinance (`data/download_data.py` → `data/NVDA_daily.csv`).
-  Rango 2021-09-15 a 2026-09-15, 1,255 barras. Precios ajustados por el split 10:1 de jun-2024.
-- Split por bloques contiguos (`src/splits.py`, sin aleatorizar):
+Este documento describe la estrategia tal como está programada en `src/`.
+Si el código y este texto no coinciden, es un error y hay que corregirlo.
 
-| Periodo | Fechas | Barras |
-|---|---|---|
-| Train | 2021-09-15 a 2024-09-14 | 754 |
-| Test | 2024-09-15 a 2025-09-14 | 249 |
-| Validation | 2025-09-15 a 2026-09-15 | 252 |
+## 1. Datos y timeframe
 
-- Los indicadores se calculan sobre la serie completa (son causales) y luego se recortan por periodo.
-  Warm-up: ADX(14) es el último en estar disponible (2021-10-21, barra 27); el train efectivo de la
-  estrategia empieza ahí (728 barras). Test y validation no pierden barras.
-- Validation no se usa para nada (ni selección, ni ajuste, ni gráficas) hasta la evaluación final.
+- Datos: velas de 5 minutos de BTCUSDT (`data/btc_project_train.csv` y `data/btc_project_test.csv`).
+- Los indicadores **no** se calculan en 5 minutos. Se calculan en velas de **4 horas** armadas con
+  `resample_ohlc` y se pasan de regreso a 5 minutos con `align_to_base` (`src/data.py`).
+- **Sin look-ahead:** una vela de 4h solo se usa cuando ya cerró. La vela que empieza a las 08:00
+  se conoce al cierre de la barra de 5 min de las 11:55, no antes.
+- **Por qué 4h:** el costo de ida y vuelta es 0.25% (0.125% al abrir y 0.125% al cerrar). En 5 minutos
+  el ATR es mucho más chico que ese costo: la comisión es más grande que el stop y ninguna operación
+  puede ganar en promedio. En 4h el movimiento típico ya es varias veces el costo.
 
-## 2. Features
-Selección: 17 candidatos estacionarios, correlación de Pearson **solo en train**; si |r| ≥ 0.70
-se conserva uno del par (`data/indicator_analysis.py`, `data/indicator_corr.png`).
+  ATR(14) / Close mediano en train (con `atr()` de `src/signals.py`):
 
-| Indicador | Ventana | Familia | Uso |
-|---|---|---|---|
-| ROC | 10 | momentum | dirección: cambio % del precio en 10 días |
-| CMF | 20 | volumen | dirección: acumulación/distribución ponderada por volumen |
-| ADX | 14 | tendencia | filtro de fuerza (sin dirección) |
-| ATR | 14 | volatilidad | solo SL/TP y sizing; no entra en la selección ni en la señal |
+  | Timeframe | ATR mediano | ATR / costo de ida y vuelta (0.25%) |
+  |-----------|-------------|-------------------------------------|
+  | 5 min     | 0.079%      | 0.3×                                |
+  | 1 hora    | 0.51%       | 2.0×                                |
+  | 4 horas   | 1.21%       | 4.8×                                |
 
-- Evidencia en train: |r| ROC–CMF = 0.54, ROC–ADX = 0.25, CMF–ADX = 0.14 → **max |r| = 0.54 < 0.70**.
-- Set anterior descartado: RSI–MFI = 0.79, RSI–ROC = 0.83, MFI–ROC = 0.74, los tres > 0.70.
-- No se usa la estrategia de referencia del curso (cruce SMA 20/50 + RSI 30/70 + MACD por mayoría).
+## 2. Los tres votos
 
-## 3. Entry rule (confluencia, AND)
-Con valores al cierre de la barra t:
+Cada indicador vota +1 (largo), -1 (corto) o 0 (no vota). Todos se calculan en velas de 4h.
 
-    señal_t = +1  si ROC_t > 0  y CMF_t > 0  y ADX_t > 25
-    señal_t = −1  si ROC_t < 0  y CMF_t < 0  y ADX_t > 25
-    señal_t =  0  en cualquier otro caso (incluye NaN de warm-up y valores exactamente 0)
+| Voto | Familia | Regla |
+|------|---------|-------|
+| `vote_ema` | Tendencia | signo(EMA_rápida − EMA_lenta) |
+| `vote_roc` | Momento | signo(ROC_n) |
+| `vote_bb` | Volatilidad | +1 si %B > u; −1 si %B < 1 − u; 0 en otro caso |
 
-- 0 en ROC y CMF es el cambio de signo: precio arriba/abajo de hace 10 días y flujo de volumen
-  comprador/vendedor neto. ADX > 25 es el umbral de Wilder (1978) para "mercado en tendencia".
-- Los umbrales son valores estándar de la literatura; no se optimizan ni se eligieron con resultados.
+%B es la posición del precio dentro de las bandas de Bollinger (0 = banda inferior, 1 = banda superior)
+y u es un umbral entre 0.5 y 1. Durante el calentamiento (indicadores en NaN) el voto es 0.
 
-## 4. Exit rule
-- Sobre el precio de entrada crudo P_e (open de entrada, sin costos) y ATR_t de la barra de señal:
-  long SL = P_e − 2·ATR_t, TP = P_e + 3·ATR_t; short SL = P_e + 2·ATR_t, TP = P_e − 3·ATR_t.
-  Risk-reward r = 3/2 = 1.5.
-- Señal opuesta (señal_t = −lado actual): cierra al open de t+1 y abre en la nueva dirección
-  en ese mismo open. Una señal 0 no cierra la posición.
-- Holding máximo 10 barras; la barra de entrada cuenta como 1 → cierre al Close de entry_bar + 9.
-- Tie intrabar (la barra toca SL y TP): se ejecuta SL.
-- Gap: si el open ya cruzó el SL o el TP, la salida se llena al open, no al nivel.
+## 3. Regla 2 de 3 y señal de entrada
+
+Con L_t = número de votos +1 y S_t = número de votos −1:
+
+```
+estado_t = +1  si L_t >= 2 y ADX_t > umbral
+estado_t = -1  si S_t >= 2 y ADX_t > umbral
+estado_t =  0  en otro caso
+```
+
+El ADX **no vota**: es un filtro de fuerza de tendencia. Con un solo voto a favor no se abre.
+
+La señal solo aparece cuando el estado cambia:
+
+```
+señal_t = estado_t  si estado_t != estado_(t-1)
+señal_t = 0         si no cambió
+```
+
+Así no se vuelve a entrar en cada barra mientras dura la misma tendencia (eso pagaría comisión una y
+otra vez). **Señal en t, ejecución en t+1:** la señal se calcula al cierre de la barra t de 5 min y la
+orden se ejecuta al open de la barra t+1.
+
+Código: `strategy_votes`, `confirmed_state`, `entry_signal` y `compute_strategy` en `src/signals.py`.
+
+## 4. Salidas
+
+Una posición se cierra por lo primero que pase:
+
+- **Stop-loss** a `sl_mult · ATR(4h)` del precio de entrada.
+- **Take-profit** a `rr · stop`, es decir a `rr · sl_mult · ATR(4h)` (en el motor: `tp_mult = rr · sl_mult`).
+- **Holding máximo:** `max_holding` barras de 5 min (la barra de entrada cuenta como la 1); se sale al cierre.
+- **Señal contraria:** si llega una señal opuesta a la posición, se cierra al open siguiente.
+
+Convenciones:
+
+- Si en la misma vela se tocan el SL y el TP, se toma el **SL** (convención conservadora).
+- Si el open ya cruzó el SL o el TP (gap), la orden se llena **al open**, no al nivel del SL/TP.
+
+El ATR y los múltiplos se fijan al entrar, con los valores de la barra de señal.
 
 ## 5. Sizing
-Risk parity por ATR con ρ = 1% del capital y apalancamiento máximo 1:
 
-    Q = floor( 0.01 · V_t / (2 · ATR_t) )
-    si Q · P_e · (1 + c) > V_t:  Q = floor( V_t / (P_e · (1 + c)) )   y el trade se marca truncated = True
-    si Q ≤ 0: no se opera
+Se arriesga una fracción `rho` del capital en cada operación:
 
-- c = costo por lado = comisión + spread/slippage = 0.15% (sección 6), para que el nocional más
-  el costo de entrada no exceda el capital.
-- V_t = capital (cash) realizado al momento de la entrada; no hay margen, el tope aplica igual a
-  long y short (nocional ≤ V_t). P_e = open de t+1.
-- El tope se activa solo si ATR_t/P_e < ~0.5%; en train el mínimo de ATR/Close es 2.4%, así que
-  se espera que casi nunca se active, pero la regla y el registro existen.
+```
+unidades = rho · capital / (sl_mult · ATR)
+```
 
-## 6. Costs
-Por lado (entrada y salida), como fracción del nocional:
+Si el precio llega al stop, la pérdida es `rho · capital` (antes de costos).
 
-| Concepto | Valor | Fuente / justificación |
-|---|---|---|
-| Comisión | 0.10% | IBKR Pro Fixed cobra $0.005/acción (máx. 1% del nocional), que a los precios reales de NVDA es < 0.01%; 0.10% es una cota conservadora y en porcentaje no depende del ajuste por split |
-| Spread + slippage | 0.05% | La mitad del spread cotizado de NVDA es ~1 centavo (< 0.01%); 0.05% deja margen para el slippage al open |
-| Borrow fee (solo shorts) | 0.50% anual | NVDA es general collateral (fácil de pedir prestado); cargo = 0.005 · Q · P_e · días / 360, con P_e crudo y días = fecha de salida − fecha de entrada (calendario); un short abierto y cerrado el mismo día paga 0 (no hay overnight) |
+**Sin apalancamiento:** si el nocional más la comisión de entrada pasa del capital disponible, las
+unidades se recortan a lo que alcanza con el capital (`compute_sizing` en `src/backtest.py`).
 
-- Sin impacto de mercado: el nocional máximo es V_t ≈ $100k, frente a un volumen diario mediano
-  en train de ~463M acciones (ajustadas) ≈ $13B → < 0.001% del volumen diario.
+## 6. Costos de transacción y break-even
 
-## 7. Conventions
-- La señal y el ATR se calculan al cierre de t; la ejecución es al open de t+1.
-- Orden de eventos dentro de cada barra:
-  1. Open: salida por gap que cruzó SL/TP (se llena al open).
-  2. Open: salida por señal opuesta (al open).
-  3. Open: entrada nueva si no hay posición.
-  4. Intrabar: SL/TP con High/Low (tie → SL), incluida la barra de entrada.
-  5. Close: salida por holding máximo.
-- Una sola posición abierta a la vez. Las entradas solo ocurren en el open, así que una
-  salida en los pasos 4 o 5 no se reemplaza hasta el open de t+1.
-- La transición long ↔ short en la misma barra solo ocurre por señal opuesta (paso 2 + paso 3).
+- **Comisión:** 0.125% por lado, en cada apertura y en cada cierre, sobre el nocional (precio · unidades).
+- **Slippage:** 0 en el escenario base. El efecto de costos más altos se mide con la curva de retorno
+  neto contra nivel de costo (`cost_sensitivity` en `src/analysis.py`).
+- **Borrow fee:** 0 (no se cobra por los cortos).
 
-## Break-even win rate
-- Sin costos: p* = 1/(1+r) = 1/2.5 = **40%**. La estrategia debe superarlo.
-- Con costos: ganancia neta = r·R − C, pérdida neta = −R − C, con R = 2·ATR·Q (riesgo) y C =
-  costo ida y vuelta. Si se igualan a cero, p* = (1 + k)/(1 + r), con k = C/R.
-- Ejemplo con la mediana de train (ATR/Close = 4.37%): C = 2 × 0.15% = 0.30% del precio,
-  R = 8.74% → k = 0.034 → p* = 1.034/2.5 ≈ **41.4%**. En el percentil 10 de ATR/Close (2.97%),
-  k = 0.051 → p* ≈ 42.0%. El borrow fee de un short de 10 barras (~14 días) suma ~0.02% → k + 0.002.
+Cada trade guarda `entry_commission` y `exit_commission` en dólares (y `entry_slippage`,
+`exit_slippage`), con los mismos montos que el motor descontó de la caja.
+
+**Break-even:** con stop a `sl_mult · ATR` y take-profit a `rr` veces el stop, la tasa de acierto que se
+necesita para no perder es `1 / (1 + rr)` sin costos. Con costos sube, porque cada operación paga
+0.25% de ida y vuelta pase lo que pase.
+
+## 7. Orden de eventos en cada barra
+
+En cada barra t el motor (`backtest` en `src/backtest.py`) hace, en este orden:
+
+1. **Open:** si el open ya cruzó el SL o el TP de la posición abierta (gap), se cierra al open.
+2. **Open:** si la señal de t−1 es contraria a la posición, se cierra al open.
+3. **Open:** si no hay posición y la señal de t−1 es ±1, se abre al open con el ATR de t−1.
+4. **Intrabar:** se revisan SL y TP con el High y el Low de t (si se tocan los dos, gana el SL).
+5. **Close:** si se cumplió el holding máximo, se cierra al cierre de t.
+
+Al final de cada barra: `equity = cash + unidades · Close` (unidades negativas en un corto).
+
+## 8. Parámetros iniciales θ0
+
+Valores antes de optimizar (`THETA0` en `src/signals.py`). Las ventanas están en velas de 4h,
+salvo `max_holding`, que está en barras de 5 min.
+
+| Parámetro | Valor | Qué es |
+|-----------|-------|--------|
+| `ema_fast` | 12 | EMA rápida |
+| `ema_slow` | 48 | EMA lenta |
+| `roc_window` | 12 | ventana del ROC |
+| `bb_window` | 20 | ventana de Bollinger |
+| `bb_std` | 2 | desviaciones estándar de las bandas |
+| `bb_threshold` | 0.7 | umbral u de %B |
+| `adx_window` | 14 | ventana del ADX |
+| `adx_threshold` | 20 | umbral del filtro ADX |
+| `atr_window` | 14 | ventana del ATR |
+| `sl_mult` | 2.0 | stop-loss en múltiplos del ATR |
+| `rr` | 3.0 | take-profit en múltiplos del stop |
+| `max_holding` | 2016 | barras de 5 min (7 días) |
+| `rho` | 0.01 | fracción del capital que se arriesga |
+
+## 9. Capital y lados
+
+- Capital inicial: 1,000,000.
+- Se opera en los dos lados: posiciones largas y cortas. Nunca hay dos posiciones abiertas a la vez.

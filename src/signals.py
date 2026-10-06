@@ -1,4 +1,6 @@
-"""Indicadores tecnicos de lab_02, calculados a mano con pandas/numpy.
+"""Indicadores tecnicos, votos y señal de la estrategia de lab_02 (docs/SPEC.md).
+
+Los indicadores se calculan a mano con pandas/numpy.
 
 Todas las funciones son causales: el valor en la barra t solo usa datos
 hasta t (ver tests/test_truncation.py).
@@ -460,3 +462,123 @@ def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
     """
     return compute_features(df)["signal"]
 
+
+
+# ---------------------------------------------------------------------------
+# Estrategia final (docs/SPEC.md): tres votos en velas de 4h, filtro ADX y
+# entrada solo cuando cambia el estado.
+# ---------------------------------------------------------------------------
+
+# Los indicadores se calculan en velas de 4 horas (ver docs/SPEC.md, seccion 1).
+TIMEFRAME = "4h"
+
+# Parametros iniciales θ0, antes de optimizar (docs/SPEC.md, seccion 8).
+THETA0 = {
+    "ema_fast": 12,
+    "ema_slow": 48,
+    "roc_window": 12,
+    "bb_window": 20,
+    "bb_std": 2,
+    "bb_threshold": 0.7,
+    "adx_window": 14,
+    "adx_threshold": 20,
+    "atr_window": 14,
+    "sl_mult": 2.0,
+    "rr": 3.0,
+    "max_holding": 2016,    # barras de 5 min = 7 dias
+    "rho": 0.01,
+}
+
+
+def _sign(values: pd.Series) -> pd.Series:
+    """+1 si el valor es positivo, -1 si es negativo y 0 si es cero o NaN."""
+    return (values > 0).astype(int) - (values < 0).astype(int)
+
+
+def strategy_votes(ema_fast: pd.Series, ema_slow: pd.Series, roc_values: pd.Series,
+                   percent_b: pd.Series, bb_threshold: float) -> pd.DataFrame:
+    """Calcula el voto de cada indicador: +1 (largo), -1 (corto) o 0 (no vota).
+
+    vote_ema = signo(EMA_rapida - EMA_lenta)              tendencia
+    vote_roc = signo(ROC)                                 momento
+    vote_bb  = +1 si %B > u; -1 si %B < 1 - u; 0 si no    volatilidad
+
+    Recibe las series de cada indicador (mismo indice) y el umbral u de %B.
+    Regresa un DataFrame con las columnas vote_ema, vote_roc y vote_bb.
+    Los NaN del calentamiento no votan.
+    """
+    vote_bb = (percent_b > bb_threshold).astype(int) - (percent_b < 1 - bb_threshold).astype(int)
+    return pd.DataFrame({
+        "vote_ema": _sign(ema_fast - ema_slow),
+        "vote_roc": _sign(roc_values),
+        "vote_bb": vote_bb,
+    }, index=ema_fast.index)
+
+
+def confirmed_state(votes: pd.DataFrame, adx_values: pd.Series, adx_threshold: float,
+                    min_votes: int = MIN_VOTES) -> pd.Series:
+    """Aplica la regla 2 de 3 con el filtro de ADX.
+
+    estado = +1 si hay al menos min_votes votos +1 y ADX > umbral;
+    estado = -1 si hay al menos min_votes votos -1 y ADX > umbral;
+    estado = 0 en otro caso. El ADX no vota: solo dice si hay tendencia fuerte.
+
+    Recibe los votos, el ADX y su umbral. Regresa el estado (+1, -1 o 0).
+    """
+    state = confirmation_signal(votes, min_votes)
+    return state.where(adx_values > adx_threshold, 0).astype(int)
+
+
+def entry_signal(state: pd.Series) -> pd.Series:
+    """Deja la señal solo en la barra donde cambia el estado.
+
+    señal_t = estado_t si estado_t != estado_(t-1); 0 si no cambio.
+    Asi no se vuelve a entrar en cada barra mientras dura la misma tendencia.
+
+    Recibe el estado por barra. Regresa la señal de entrada (+1, -1 o 0).
+    """
+    previous = state.shift(1, fill_value=0)
+    return state.where(state != previous, 0).astype(int)
+
+
+def compute_strategy(df: pd.DataFrame, params: dict = THETA0) -> pd.DataFrame:
+    """Calcula indicadores, votos, estado y señal de la estrategia final.
+
+    Los indicadores se calculan en velas de 4h y se pasan a 5 min con
+    align_to_base: una vela de 4h solo se usa cuando ya cerro (sin look-ahead).
+    La señal se toma al cierre de la barra t de 5 min; el motor la ejecuta
+    al open de t+1.
+
+    Recibe las velas de 5 min (Open, High, Low, Close) y los parametros θ.
+    Regresa un DataFrame con el mismo indice que df y las columnas ema_fast,
+    ema_slow, roc, percent_b, adx, atr, vote_ema, vote_roc, vote_bb, state
+    y signal.
+    """
+    # 1. Indicadores en velas de 4h.
+    bars = resample_ohlc(df, TIMEFRAME)
+    high, low, close = bars["High"], bars["Low"], bars["Close"]
+    features = pd.DataFrame({
+        "ema_fast": ema(close, params["ema_fast"]),
+        "ema_slow": ema(close, params["ema_slow"]),
+        "roc": roc(close, params["roc_window"]),
+        "percent_b": bollinger_percent_b(close, params["bb_window"], params["bb_std"]),
+        "adx": adx(high, low, close, params["adx_window"]),
+        "atr": atr(high, low, close, params["atr_window"]),
+    })
+    # Sin voto de EMA hasta que la EMA lenta tenga historia suficiente.
+    features.loc[features.index[:params["ema_slow"] - 1], ["ema_fast", "ema_slow"]] = float("nan")
+
+    # 2. Votos y estado, tambien en 4h.
+    votes = strategy_votes(features["ema_fast"], features["ema_slow"], features["roc"],
+                           features["percent_b"], params["bb_threshold"])
+    features = features.join(votes)
+    features["state"] = confirmed_state(votes, features["adx"], params["adx_threshold"])
+
+    # 3. Pasar a 5 min sin look-ahead; antes de la primera vela cerrada no hay voto.
+    aligned = align_to_base(features, df.index, TIMEFRAME)
+    for col in [*votes.columns, "state"]:
+        aligned[col] = aligned[col].fillna(0).astype(int)
+
+    # 4. Señal de entrada: solo en la barra de 5 min donde cambia el estado.
+    aligned["signal"] = entry_signal(aligned["state"])
+    return aligned

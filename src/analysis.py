@@ -25,7 +25,7 @@ def cost_sensitivity(df: pd.DataFrame, config: BacktestConfig,
     """Sharpe y equity final por costo de ida y vuelta, por periodo.
 
     Para cada costo de ida y vuelta (en bps) corre backtest() con
-    cost_rate = bps / 2 / 10_000 (costo por lado) sobre toda la serie de df,
+    commission_rate = bps / 2 / 10_000 (costo por lado) y slippage 0 sobre toda la serie de df,
     y mide cada periodo por separado con summarize() (equity rebasada al
     inicio del periodo). El borrow fee no cambia entre escenarios.
 
@@ -34,7 +34,7 @@ def cost_sensitivity(df: pd.DataFrame, config: BacktestConfig,
     df : pd.DataFrame
         OHLCV con indice de fechas (ya recortado a los periodos permitidos).
     config : BacktestConfig
-        Configuracion base; solo se sustituye cost_rate.
+        Configuracion base; solo se sustituye el costo por lado.
     round_trip_bps : Iterable[float]
         Costos de ida y vuelta en puntos base (default 0, 5, ..., 50).
     periods : dict, opcional
@@ -50,7 +50,7 @@ def cost_sensitivity(df: pd.DataFrame, config: BacktestConfig,
 
     rows = []
     for bps in round_trip_bps:
-        run_config = replace(config, cost_rate=bps / 2 / 10_000)
+        run_config = replace(config, commission_rate=bps / 2 / 10_000, slippage_rate=0.0)
         result = backtest(df, features["signal"], features["atr_14"], run_config)
         row = {"bps": bps}
         for name, (start, end) in periods.items():
