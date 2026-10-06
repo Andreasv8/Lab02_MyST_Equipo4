@@ -1,9 +1,9 @@
-"""Graficas de lab_02 (matplotlib) para los notebooks de las Act 06 y 07.
+"""Graficas de lab_02 (matplotlib) para el reporte.
 
-Cada funcion recibe los datos ya calculados y un Axes, y solo dibuja. Las
-graficas de varios paneles de regimenes (Act 07) crean y regresan su Figure.
-Convenciones: un eje y por grafica, estrategia en azul y buy & hold en gris,
-regimenes con color fijo por nombre, rejilla tenue, titulos y ejes con unidades.
+Cada funcion recibe los datos ya calculados y solo dibuja; las que arman una
+figura completa la crean y la regresan para guardarla. Todas llevan titulo,
+ejes con nombre y leyenda (PDF 3.6). Convenciones: un eje y por grafica,
+colores fijos por curva y por regimen, rejilla tenue.
 """
 
 from typing import Optional
@@ -43,69 +43,6 @@ def _split_line(ax: plt.Axes, split_date: pd.Timestamp, label: str = "inicio de 
     y, offset = (1, -12) if at_top else (0, 6)
     ax.annotate(label, xy=(split_date, y), xycoords=("data", "axes fraction"),
                 xytext=(4, offset), textcoords="offset points", fontsize=9, color="#3d3c39")
-
-
-def plot_equity(ax: plt.Axes, strategy: pd.Series, benchmark: pd.Series,
-                split_date: pd.Timestamp) -> plt.Axes:
-    """Curva de equity de la estrategia vs buy & hold, en escala logaritmica.
-
-    Parametros
-    ----------
-    ax : plt.Axes
-        Ejes donde dibujar.
-    strategy, benchmark : pd.Series
-        Equity por barra (USD) con indice de fechas.
-    split_date : pd.Timestamp
-        Primer dia de test (linea vertical).
-
-    Regresa
-    -------
-    plt.Axes
-    """
-    ax.plot(strategy.index, strategy, color=STRATEGY_COLOR, linewidth=2, label="Estrategia")
-    ax.plot(benchmark.index, benchmark, color=BENCHMARK_COLOR, linewidth=2, label="Buy & hold BTCUSDT")
-    ax.set_yscale("log")
-    ax.yaxis.set_major_locator(mticker.LogLocator(base=10, subs=[1.0, 2.0, 5.0]))
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
-    ax.yaxis.set_minor_locator(mticker.NullLocator())
-    _split_line(ax, split_date)
-    ax.set_title("Equity: estrategia vs buy & hold (escala log)")
-    ax.set_xlabel("Fecha")
-    ax.set_ylabel("Equity (USD, escala log)")
-    ax.legend(loc="upper left", frameon=False)
-    _style(ax)
-    return ax
-
-
-def plot_drawdown(ax: plt.Axes, strategy_dd: pd.Series, benchmark_dd: pd.Series,
-                  split_date: pd.Timestamp) -> plt.Axes:
-    """Drawdown sobre el capital (siempre <= 0) de la estrategia y de buy & hold.
-
-    Parametros
-    ----------
-    ax : plt.Axes
-        Ejes donde dibujar.
-    strategy_dd, benchmark_dd : pd.Series
-        Drawdown por barra como fraccion (<= 0).
-    split_date : pd.Timestamp
-        Primer dia de test (linea vertical).
-
-    Regresa
-    -------
-    plt.Axes
-    """
-    ax.plot(benchmark_dd.index, benchmark_dd * 100, color=BENCHMARK_COLOR, linewidth=1.5,
-            label="Buy & hold BTCUSDT")
-    ax.plot(strategy_dd.index, strategy_dd * 100, color=STRATEGY_COLOR, linewidth=1.5, label="Estrategia")
-    ax.set_ylim(top=0)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
-    _split_line(ax, split_date, at_top=False)
-    ax.set_title("Drawdown sobre el capital")
-    ax.set_xlabel("Fecha")
-    ax.set_ylabel("Drawdown (%)")
-    ax.legend(loc="lower left", frameon=False)
-    _style(ax)
-    return ax
 
 
 def plot_cost_sensitivity(ax: plt.Axes, sensitivity: pd.DataFrame, assumed_bps: float,
@@ -271,138 +208,110 @@ def plot_feature_distributions(features: pd.DataFrame, labels_df: pd.DataFrame,
     return fig
 
 
-STUDY_COLORS = {"global": "#1f1e1c", **REGIME_COLORS}
+# ---------------------------------------------------------------------------
+# Resultados de la estrategia (PDF 3.6)
+# ---------------------------------------------------------------------------
+
+# Color fijo por curva; las que no esten aqui usan el azul de la estrategia.
+CURVE_COLORS = {"con régimen": STRATEGY_COLOR, "solo global": "#e8a33d",
+                "θ_final global": STRATEGY_COLOR, "buy & hold": BENCHMARK_COLOR}
+MONTHS = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 
 
-def plot_convergence(ax: plt.Axes, curves: dict, n_startup: int = 150,
-                     title: str = "Convergencia: mejor J acumulado por trial (train)",
-                     ylabel: str = "Mejor Calmar en train (adimensional)") -> plt.Axes:
-    """Convergencia de Optuna: mejor J (Calmar en train) acumulado contra el numero de trial.
-
-    Parametros
-    ----------
-    ax : plt.Axes
-        Ejes donde dibujar.
-    curves : dict[str, pd.Series]
-        Nombre del estudio ("global" o regimen) -> salida de convergence_curve.
-    n_startup : int
-        Trials aleatorios iniciales (linea vertical: ahi empieza TPE).
-    title, ylabel : str
-        Titulo y etiqueta del eje y.
-
-    Regresa
-    -------
-    plt.Axes
-    """
-    for name, curve in curves.items():
-        finite = curve.replace(-np.inf, np.nan)
-        ax.step(finite.index, finite.to_numpy(), where="post", linewidth=2,
-                color=STUDY_COLORS.get(name, STRATEGY_COLOR), label=name)
-    ax.axvline(n_startup, color=REFERENCE_COLOR, linestyle="--", linewidth=1)
-    ax.annotate("fin random search / inicio TPE", xy=(n_startup, 0), xycoords=("data", "axes fraction"),
-                xytext=(4, 6), textcoords="offset points", fontsize=9, color="#3d3c39")
-    ax.set_title(title)
-    ax.set_xlabel("Trial")
-    ax.set_ylabel(ylabel)
-    ax.legend(loc="lower right", frameon=False)
-    _style(ax)
-    return ax
-
-
-def plot_param_importances(ax: plt.Axes, importances: pd.Series, title: str) -> plt.Axes:
-    """Importancia relativa de cada parametro de θ en J (barras horizontales, suman 1).
-
-    Parametros
-    ----------
-    ax : plt.Axes
-        Ejes donde dibujar.
-    importances : pd.Series
-        Parametro -> importancia (salida de param_importances).
-    title : str
-        Titulo del panel (p. ej. el nombre del estudio).
-
-    Regresa
-    -------
-    plt.Axes
-    """
-    ordered = importances.sort_values()
-    ax.barh(ordered.index, ordered.to_numpy(), color=STRATEGY_COLOR)
-    ax.set_title(title)
-    ax.set_xlabel("Importancia relativa (fANOVA, suma 1)")
-    _style(ax)
-    return ax
-
-
-EQUITY_CURVE_COLORS = {"buy & hold": BENCHMARK_COLOR, "θ0": REFERENCE_COLOR,
-                       "θ*": "#1f1e1c", "θ*_régimen": STRATEGY_COLOR,
-                       "v1 θ*": "#e8a33d", "v1 θ*_régimen": "#e34948",
-                       "v2 θ* robusto": "#1f1e1c", "v2 θ*_régimen robusto": STRATEGY_COLOR}
-
-
-def plot_equity_curves(ax: plt.Axes, curves: dict, split_date: pd.Timestamp,
-                       title: str = "Equity: buy & hold vs θ0, θ* y θ* por régimen (escala log)") -> plt.Axes:
-    """Curvas de equity de varias estrategias en escala logaritmica, con el corte train/test.
-
-    Parametros
-    ----------
-    ax : plt.Axes
-        Ejes donde dibujar.
-    curves : dict[str, pd.Series]
-        Nombre -> equity por barra (USD).
-    split_date : pd.Timestamp
-        Primer dia de test (linea vertical).
-    title : str
-        Titulo del panel.
-
-    Regresa
-    -------
-    plt.Axes
-    """
-    for name, equity in curves.items():
-        ax.plot(equity.index, equity, linewidth=2, label=name,
-                color=EQUITY_CURVE_COLORS.get(name, STRATEGY_COLOR))
-    ax.set_yscale("log")
-    ax.yaxis.set_major_locator(mticker.LogLocator(base=10, subs=[1.0, 2.0, 5.0]))
+def _usd(ax: plt.Axes) -> None:
+    """Eje y en dolares con separador de miles."""
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
-    ax.yaxis.set_minor_locator(mticker.NullLocator())
-    _split_line(ax, split_date)
+
+
+def plot_portfolio(curves: dict, benchmark: pd.Series, title: str) -> plt.Figure:
+    """Valor del portafolio en el tiempo de cada curva contra el benchmark.
+
+    Recibe {nombre: equity por barra} y la equity del buy & hold (mismo periodo).
+    Regresa la figura.
+    """
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.plot(benchmark.index, benchmark, color=BENCHMARK_COLOR, linewidth=1.5, label="buy & hold")
+    for name, equity in curves.items():
+        ax.plot(equity.index, equity, color=CURVE_COLORS.get(name, STRATEGY_COLOR), linewidth=1.8, label=name)
     ax.set_title(title)
     ax.set_xlabel("Fecha")
-    ax.set_ylabel("Equity (USD, escala log)")
+    ax.set_ylabel("Valor del portafolio (USD)")
+    _usd(ax)
     ax.legend(loc="upper left", frameon=False)
     _style(ax)
-    return ax
+    fig.tight_layout()
+    return fig
 
 
-def plot_plateau(axes, study, top: list, theta: dict, name: str) -> None:
-    """Meseta de un estudio: J walk-forward contra cada parametro de salida.
+def plot_drawdown(curves: dict, title: str) -> plt.Figure:
+    """Drawdown (caida desde el maximo previo, en %) de cada curva.
 
-    Un panel por parametro: todos los trials con J finito en gris, el top 10%
-    en el color del estudio y una linea vertical en el θ final (mediana del top).
-
-    Parametros
-    ----------
-    axes : arreglo de plt.Axes
-        Un eje por parametro, en el orden de theta_params.
-    study : optuna.Study
-        Estudio del walk-forward.
-    top : list de optuna.trial.FrozenTrial
-        Trials del top 10% (top_trials).
-    theta : dict
-        θ final del estudio.
-    name : str
-        Nombre del estudio ("global" o regimen).
+    Recibe {nombre: equity por barra}. Regresa la figura.
     """
-    finite = [t for t in study.trials if t.value is not None and np.isfinite(t.value)]
-    color = STUDY_COLORS.get(name, STRATEGY_COLOR)
-    for ax, param in zip(axes, ["sl_mult", "rr", "max_holding"]):
-        ax.scatter([t.params[param] for t in finite], [t.value for t in finite],
-                   s=12, color=REFERENCE_COLOR, alpha=0.6, label="trials con J finito")
-        ax.scatter([t.params[param] for t in top], [t.value for t in top],
-                   s=22, color=color, label="top 10%")
-        ax.axvline(theta[param], color=color, linestyle="--", linewidth=1.2, label="θ final (mediana)")
-        ax.set_title(f"{name}: {param}")
-        ax.set_xlabel(param)
-        ax.set_ylabel("J walk-forward (Calmar OOS)")
-        _style(ax)
-    axes[0].legend(loc="lower left", frameon=False, fontsize=8)
+    fig, ax = plt.subplots(figsize=(11, 4))
+    for name, equity in curves.items():
+        drawdown = (equity / equity.cummax() - 1) * 100
+        ax.plot(drawdown.index, drawdown, color=CURVE_COLORS.get(name, STRATEGY_COLOR),
+                linewidth=1.4, label=name)
+    ax.set_ylim(top=0)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.set_title(title)
+    ax.set_xlabel("Fecha")
+    ax.set_ylabel("Drawdown (%)")
+    ax.legend(loc="lower left", frameon=False)
+    _style(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _monthly_grid(monthly: pd.Series) -> pd.DataFrame:
+    """Retornos mensuales como tabla año x mes, en %."""
+    grid = pd.DataFrame({"year": monthly.index.year, "month": monthly.index.month,
+                         "ret": monthly.to_numpy() * 100})
+    return grid.pivot(index="year", columns="month", values="ret").reindex(columns=range(1, 13))
+
+
+def _bar_returns(ax: plt.Axes, values: pd.Series, labels: list, title: str) -> None:
+    """Barras de retorno en %: verde si gana, rojo si pierde."""
+    colors = ["#2e8b57" if v >= 0 else "#e34948" for v in values]
+    ax.bar(labels, values * 100, color=colors, label="retorno del periodo")
+    ax.axhline(0, color=REFERENCE_COLOR, linewidth=0.8)
+    ax.set_title(title)
+    ax.set_xlabel("Periodo")
+    ax.set_ylabel("Retorno (%)")
+    ax.legend(loc="upper left", frameon=False, fontsize=8)
+    ax.tick_params(axis="x", rotation=45)
+    _style(ax)
+
+
+def plot_returns_table(monthly: pd.Series, quarterly: pd.Series, annual: pd.Series,
+                       title: str) -> plt.Figure:
+    """Tabla de retornos: heatmap mensual (año x mes, con el numero en cada celda),
+    mas barras de retornos trimestrales y anuales.
+
+    Recibe las salidas de metrics.returns_table. Regresa la figura.
+    """
+    grid = _monthly_grid(monthly)
+    fig = plt.figure(figsize=(12, 7))
+    ax_map = fig.add_subplot(2, 1, 1)
+    limit = max(np.nanmax(np.abs(grid.to_numpy())), 1e-9)
+    image = ax_map.imshow(grid.to_numpy(), cmap="RdYlGn", vmin=-limit, vmax=limit, aspect="auto")
+    for i, year in enumerate(grid.index):
+        for j in range(12):
+            value = grid.iloc[i, j]
+            if np.isfinite(value):
+                ax_map.text(j, i, f"{value:.1f}%", ha="center", va="center", fontsize=8)
+    ax_map.set_xticks(range(12), MONTHS)
+    ax_map.set_yticks(range(len(grid.index)), [str(y) for y in grid.index])
+    ax_map.set_xlabel("Mes")
+    ax_map.set_ylabel("Año")
+    ax_map.set_title(f"{title}: retornos mensuales")
+    fig.colorbar(image, ax=ax_map, label="Retorno mensual (%)")
+
+    ax_q = fig.add_subplot(2, 2, 3)
+    quarter_labels = [f"{d.year} T{(d.month - 1) // 3 + 1}" for d in quarterly.index]
+    _bar_returns(ax_q, quarterly, quarter_labels, "Retornos trimestrales")
+    ax_y = fig.add_subplot(2, 2, 4)
+    _bar_returns(ax_y, annual, [str(d.year) for d in annual.index], "Retornos anuales")
+    fig.tight_layout()
+    return fig

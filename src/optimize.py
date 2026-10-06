@@ -11,6 +11,7 @@ Todas las semanas de test se juntan en una sola curva fuera de muestra (OOS)
 con un backtest continuo.
 """
 
+import math
 import time
 from typing import Optional
 
@@ -40,6 +41,12 @@ BAR = pd.Timedelta(minutes=5)
 CAPITAL = 1_000_000.0
 STUDIES = ["global", *REGIME_NAMES]
 PARAM_COLUMNS = ["sl_mult", "tp_mult", "max_holding", "rho"]
+
+# Parametros del espacio de busqueda (los que se optimizan) y cuales son enteros.
+SEARCH_PARAMS = ["ema_fast", "slow_ratio", "roc_window", "bb_window", "bb_threshold",
+                 "adx_threshold", "sl_mult", "rr", "max_holding", "rho"]
+INT_PARAMS = ["ema_fast", "roc_window", "bb_window", "max_holding"]
+FIXED_PARAMS = {"bb_std": 2, "adx_window": 14, "atr_window": 14}
 
 
 # ---------------------------------------------------------------------------
@@ -111,13 +118,13 @@ def suggest_params(trial: optuna.Trial) -> dict:
 
 
 def train_score(df_warm: pd.DataFrame, train_index: pd.DatetimeIndex, labels: pd.Series,
-                params: dict, regime: Optional[str]) -> tuple[float, int]:
-    """Calmar y numero de trades de θ en las barras de train.
+                params: dict, regime: Optional[str]) -> tuple[float, int, float]:
+    """Calmar, numero de trades y retorno total de θ en las barras de train.
 
     Los indicadores se calculan con el calentamiento (df_warm) y el backtest
     solo corre en las barras de train. Si regime no es None, solo se permiten
     entradas en barras de señal de ese regimen.
-    Regresa (calmar, n_trades).
+    Regresa (calmar, n_trades, retorno total como fraccion).
     """
     features = compute_strategy(df_warm, params).loc[train_index]
     signal = features["signal"]
@@ -125,7 +132,8 @@ def train_score(df_warm: pd.DataFrame, train_index: pd.DatetimeIndex, labels: pd
         signal = signal.where(labels.loc[train_index] == regime, 0)
     result = backtest(df_warm.loc[train_index], signal, features["atr"],
                       config_from_params(params, CAPITAL))
-    return calmar_ratio(result.equity["equity"]), len(result.trades)
+    equity = result.equity["equity"]
+    return calmar_ratio(equity), len(result.trades), equity.iloc[-1] / equity.iloc[0] - 1
 
 
 def run_study(df_warm: pd.DataFrame, train_index: pd.DatetimeIndex, labels: pd.Series,
@@ -134,15 +142,16 @@ def run_study(df_warm: pd.DataFrame, train_index: pd.DatetimeIndex, labels: pd.S
 
     Un trial con menos trades que el minimo, o con Calmar no finito, es
     invalido y recibe INVALID_SCORE.
-    Regresa el mejor trial valido como {"params", "calmar", "n_trades"}, o None.
+    Regresa el mejor trial valido como {"params", "calmar", "n_trades", "total_return"}, o None.
     """
     min_trades = MIN_TRADES_GLOBAL if regime is None else MIN_TRADES_REGIME
 
     def objective(trial: optuna.Trial) -> float:
         params = suggest_params(trial)
-        calmar, n_trades = train_score(df_warm, train_index, labels, params, regime)
+        calmar, n_trades, total_return = train_score(df_warm, train_index, labels, params, regime)
         trial.set_user_attr("params", params)
         trial.set_user_attr("n_trades", n_trades)
+        trial.set_user_attr("total_return", total_return)
         if n_trades < min_trades or not np.isfinite(calmar):
             return INVALID_SCORE
         return calmar
@@ -155,7 +164,7 @@ def run_study(df_warm: pd.DataFrame, train_index: pd.DatetimeIndex, labels: pd.S
     if best.value <= INVALID_SCORE:
         return None
     return {"params": best.user_attrs["params"], "calmar": best.value,
-            "n_trades": best.user_attrs["n_trades"]}
+            "n_trades": best.user_attrs["n_trades"], "total_return": best.user_attrs["total_return"]}
 
 
 def optimize_window(df: pd.DataFrame, window: dict, number: int, n_trials: int = N_TRIALS) -> dict:
@@ -337,3 +346,112 @@ def run_oos_both(df: pd.DataFrame, results: list[dict], capital: float = CAPITAL
         "regimen": run_oos(df, build_oos_inputs(df, results, use_regimes=True), capital),
         "global": run_oos(df, build_oos_inputs(df, results, use_regimes=False), capital),
     }
+
+
+# ---------------------------------------------------------------------------
+# 4. θ_final y degradacion train -> OOS
+# ---------------------------------------------------------------------------
+
+def _round_half_up(x: float) -> int:
+    """Redondeo con .5 hacia arriba (Python redondea .5 al par: round(12.5) = 12)."""
+    return int(math.floor(x + 0.5))
+
+
+def _ema_slow(ema_fast: int, slow_ratio: float) -> int:
+    """EMA lenta = round(ema_fast · slow_ratio); siempre al menos ema_fast + 1."""
+    return max(int(round(ema_fast * slow_ratio)), ema_fast + 1)
+
+
+def theta_from_values(values: dict) -> dict:
+    """Arma un θ completo a partir de los parametros del espacio de busqueda.
+
+    Redondea los enteros, recalcula ema_slow y agrega los parametros fijos.
+    """
+    theta = {name: values[name] for name in SEARCH_PARAMS}
+    for name in INT_PARAMS:
+        theta[name] = _round_half_up(theta[name])
+    theta["ema_slow"] = _ema_slow(theta["ema_fast"], theta["slow_ratio"])
+    return {**theta, **FIXED_PARAMS}
+
+
+def theta_final(results: list[dict]) -> dict:
+    """θ_final de cada estudio segun docs/SPEC.md, seccion 13.
+
+    Mediana de cada parametro del espacio de busqueda sobre los mejores trials
+    validos de las ventanas (las ventanas sin trial valido en ese estudio no
+    cuentan; no se usa R5). Enteros redondeados y ema_slow recalculada.
+    Regresa {estudio: θ, o None si ninguna ventana tuvo trial valido}.
+    """
+    final = {}
+    for name in STUDIES:
+        chosen = [r["best"][name]["params"] for r in results if r["best"][name] is not None]
+        if not chosen:
+            final[name] = None
+            continue
+        medians = {param: float(np.median([theta[param] for theta in chosen])) for param in SEARCH_PARAMS}
+        final[name] = theta_from_values(medians)
+    return final
+
+
+def weekly_oos_returns(equity: pd.Series, results: list[dict]) -> pd.Series:
+    """Retorno de cada semana de test sobre una curva OOS continua.
+
+    retorno = equity al cierre de la ultima barra de la semana / equity al
+    cierre de la ultima barra de la semana anterior - 1 (la primera semana se
+    mide contra el valor inicial de la curva).
+    Regresa una Series indexada por numero de ventana.
+    """
+    weekly = {}
+    start_value = equity.iloc[0]
+    for r in results:
+        week = equity[(equity.index >= r["test_start"]) & (equity.index < r["test_end"])]
+        weekly[r["number"]] = week.iloc[-1] / start_value - 1
+        start_value = week.iloc[-1]
+    return pd.Series(weekly, name="oos_weekly_return")
+
+
+def degradation_table(results: list[dict], oos: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Cuanto de la ventaja de train sobrevive fuera de muestra (PDF, pregunta 2).
+
+    Por ventana: Calmar, trades y retorno semanal promedio del mejor trial
+    global en train, y el retorno de su semana OOS en cada curva.
+
+    Resumen, para cada curva OOS, con dos comparaciones:
+    - Calmar: mediana del Calmar de train contra el Calmar de la curva OOS.
+      OJO: no son directamente comparables. El Calmar de train se anualiza
+      desde ~4 semanas y su drawdown maximo es el de un solo mes; el de la
+      curva OOS cubre ~17 meses, donde el drawdown maximo es mucho mas grande.
+      Por eso tambien se compara en la misma escala:
+    - Retorno semanal: retorno total del mejor trial global / semanas de la
+      ventana, promediado, contra el promedio de los retornos semanales OOS.
+    proporcion_que_sobrevive = OOS / train en cada comparacion.
+
+    Recibe los resultados por ventana y {nombre de curva: BacktestResult}.
+    Regresa (tabla por ventana, resumen con una fila por curva y comparacion).
+    """
+    rows = []
+    for r in results:
+        best = r["best"]["global"]
+        weeks = (r["train_end"] - r["train_start"]) / pd.Timedelta(days=7)
+        rows.append({
+            "window": r["number"],
+            "test_start": r["test_start"],
+            "calmar_train": best["calmar"] if best else np.nan,
+            "n_trades_train": best["n_trades"] if best else 0,
+            "weekly_return_train": best["total_return"] / weeks if best else np.nan,
+        })
+    table = pd.DataFrame(rows).set_index("window")
+    for name, result in oos.items():
+        table[f"weekly_return_oos_{name}"] = weekly_oos_returns(result.equity["equity"], results)
+
+    summary = []
+    for name, result in oos.items():
+        train_calmar = table["calmar_train"].median()
+        oos_calmar = calmar_ratio(result.equity["equity"])
+        train_weekly = table["weekly_return_train"].mean()
+        oos_weekly = table[f"weekly_return_oos_{name}"].mean()
+        summary.append({"curve": name, "comparison": "calmar", "train": train_calmar,
+                        "oos": oos_calmar, "share_survives": oos_calmar / train_calmar})
+        summary.append({"curve": name, "comparison": "weekly_return", "train": train_weekly,
+                        "oos": oos_weekly, "share_survives": oos_weekly / train_weekly})
+    return table, pd.DataFrame(summary)

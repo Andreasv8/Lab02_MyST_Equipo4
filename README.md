@@ -50,6 +50,7 @@ python -m pytest -q
 ```
 .
 ├── README.md
+├── main.py
 ├── requirements.txt
 ├── .gitignore
 ├── .claude/
@@ -58,7 +59,9 @@ python -m pytest -q
 │   ├── btc_project_train.csv
 │   └── btc_project_test.csv
 ├── docs/
-│   └── SPEC.md
+│   ├── SPEC.md
+│   ├── figures/         (figuras que genera main.py)
+│   └── tables/          (tablas que genera main.py)
 ├── notebooks/
 │   └── analysis.ipynb
 ├── src/
@@ -81,6 +84,7 @@ python -m pytest -q
     ├── test_execution.py
     ├── test_metrics.py
     ├── test_optimize.py
+    ├── test_plots.py
     └── test_regimes.py
 ```
 

@@ -384,6 +384,50 @@ def summarize(equity_df: pd.DataFrame, trades: pd.DataFrame, config,
 
 
 # ---------------------------------------------------------------------------
+# Resumen de desempeño y tabla de retornos (PDF 3.2)
+# ---------------------------------------------------------------------------
+
+def performance_summary(equity_df: pd.DataFrame, trades: pd.DataFrame) -> pd.Series:
+    """Metricas principales de una curva: Sharpe, Sortino, Calmar, MDD, win rate y mas.
+
+    Recibe la equity por barra (columnas equity y shares, como backtest().equity)
+    y los trades (puede estar vacio, como en buy & hold).
+    Regresa una Series con sharpe, sortino, calmar, max_drawdown (fraccion <= 0),
+    win_rate (% de trades con pnl > 0; NaN sin trades), total_return (fraccion),
+    n_trades y exposure (fraccion de barras con posicion).
+    """
+    equity = equity_df["equity"]
+    r = returns(equity)
+    n_trades = len(trades)
+    win_rate = compute_win_rate(trades.to_dict("records")) if n_trades else np.nan
+    return pd.Series({
+        "sharpe": sharpe_ratio(r),
+        "sortino": sortino_ratio(r),
+        "calmar": calmar_ratio(equity),
+        "max_drawdown": max_drawdown(equity),
+        "win_rate": win_rate,
+        "total_return": equity.iloc[-1] / equity.iloc[0] - 1,
+        "n_trades": n_trades,
+        "exposure": exposure(equity_df),
+    })
+
+
+def returns_table(equity: pd.Series, freq: str) -> pd.Series:
+    """Retorno de cada periodo calendario: mensual ("ME"), trimestral ("QE") o anual ("YE").
+
+    retorno = ultimo valor del periodo / ultimo valor del periodo anterior - 1.
+    El primer periodo se mide contra el primer valor de la serie (puede ser
+    un periodo incompleto).
+    Recibe la equity por barra y la frecuencia de pandas.
+    Regresa una Series con indice = fin de cada periodo.
+    """
+    period_end = equity.resample(freq).last().dropna()
+    previous = period_end.shift(1)
+    previous.iloc[0] = equity.iloc[0]
+    return period_end / previous - 1
+
+
+# ---------------------------------------------------------------------------
 # Robustez a costos de transaccion
 # ---------------------------------------------------------------------------
 

@@ -19,7 +19,9 @@ from src.metrics import (
     drawdown_series,
     exposure,
     max_drawdown,
+    performance_summary,
     returns,
+    returns_table,
     sharpe_ratio,
     sortino_ratio,
     summarize,
@@ -187,3 +189,47 @@ def test_cost_sensitivity_grid_and_costs_hurt():
     for period in ["a", "b"]:
         assert sensitivity.loc[50, f"equity_final_{period}"] <= sensitivity.loc[0, f"equity_final_{period}"]
     pd.testing.assert_frame_equal(df, df_before)
+
+
+def test_performance_summary_by_hand():
+    """Equity 100 -> 110 -> 99 -> 121 con 2 trades (1 gana, 1 pierde).
+
+    Retorno total = 121/100 - 1 = 21%; MDD = 99/110 - 1 = -10%;
+    win rate = 50%; exposicion = 2 de 4 barras con unidades = 0.5.
+    """
+    dates = pd.date_range("2024-01-01", periods=4, freq="5min")
+    equity_df = pd.DataFrame({"equity": [100.0, 110.0, 99.0, 121.0], "shares": [0, 1, 1, 0]}, index=dates)
+    trades = pd.DataFrame({"pnl": [10.0, -5.0]})
+
+    summary = performance_summary(equity_df, trades)
+
+    assert summary["total_return"] == pytest.approx(0.21)
+    assert summary["max_drawdown"] == pytest.approx(99 / 110 - 1)
+    assert summary["win_rate"] == 50.0
+    assert summary["n_trades"] == 2
+    assert summary["exposure"] == 0.5
+    assert summary["sharpe"] == pytest.approx(sharpe_ratio(returns(equity_df["equity"])))
+    assert summary["calmar"] == pytest.approx(calmar_ratio(equity_df["equity"]))
+
+
+def test_performance_summary_without_trades_has_nan_win_rate():
+    """Buy & hold no tiene trades: win rate NaN y 0 trades."""
+    dates = pd.date_range("2024-01-01", periods=3, freq="5min")
+    equity_df = pd.DataFrame({"equity": [100.0, 101.0, 102.0], "shares": [1, 1, 1]}, index=dates)
+    summary = performance_summary(equity_df, pd.DataFrame(columns=["pnl"]))
+    assert summary["n_trades"] == 0
+    assert math.isnan(summary["win_rate"])
+
+
+def test_returns_table_by_hand():
+    """Enero cierra en 110 (+10% sobre 100), febrero en 121 (+10%), marzo en 100 (-17.36%).
+
+    El trimestre completo: 100 -> 100 = 0%.
+    """
+    equity = pd.Series([100.0, 105.0, 110.0, 121.0, 100.0],
+                       index=pd.to_datetime(["2023-01-01", "2023-01-15", "2023-01-31",
+                                             "2023-02-15", "2023-03-31"]))
+    monthly = returns_table(equity, "ME")
+    assert monthly.tolist() == pytest.approx([0.10, 0.10, 100 / 121 - 1])
+    assert returns_table(equity, "QE").tolist() == pytest.approx([0.0])
+    assert returns_table(equity, "YE").index[0] == pd.Timestamp("2023-12-31")
