@@ -10,7 +10,8 @@ from typing import Optional
 
 import pandas as pd
 
-from src.indicators import adx, atr, directional_indicators, macd_histogram, roc, chaikin_money_flow, macd_line
+from src.data import align_to_base, resample_ohlc
+from src.indicators import adx, atr, directional_indicators, ema, macd_histogram, roc, chaikin_money_flow, macd_line
 COMMISSION_RATE = 0.00125
 SLIPPAGE_RATE = 0.0005
 TOTAL_COST_RATE = COMMISSION_RATE + SLIPPAGE_RATE
@@ -125,6 +126,73 @@ def compute_features(df: pd.DataFrame, roc_window: int = 10, macd_fast: int = 12
         "n_short": (votes == -1).sum(axis=1),
         "signal": confirmation_signal(votes),
     })
+
+
+def ema_adx_signal(ema_fast: pd.Series, ema_slow: pd.Series, adx_values: pd.Series,
+                   adx_threshold: float = ADX_THRESHOLD) -> pd.Series:
+    """Señal de la estrategia EMA + ADX (estrategia 2).
+
+    señal_t = +1 si EMA_rapida > EMA_lenta y ADX > umbral   (tendencia alcista)
+    señal_t = -1 si EMA_rapida < EMA_lenta y ADX > umbral   (tendencia bajista)
+    señal_t =  0 en otro caso (ADX debil, EMAs iguales o NaN de warm-up)
+    """
+    trend = (ema_fast > ema_slow).astype(int) - (ema_fast < ema_slow).astype(int)
+    return trend.where(adx_values > adx_threshold, 0).astype(int)
+
+
+def compute_ema_adx_features(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 50,
+                             adx_window: int = 14, adx_threshold: float = ADX_THRESHOLD,
+                             atr_window: int = 14, timeframe: str = "1h",
+                             entry_on_change: bool = True) -> pd.DataFrame:
+    """Indicadores y señal EMA + ADX calculados en un timeframe mayor y llevados a 5 min.
+
+    Las barras de 5 minutos son muy ruidosas (efficiency ratio ~ random walk),
+    asi que EMAs, ADX y ATR se calculan sobre barras agregadas de `timeframe`
+    y se alinean sin look-ahead al indice de 5 minutos (ver align_to_base).
+    La ejecucion (entrada, SL/TP, holding) sigue ocurriendo en 5 minutos.
+
+    Parametros
+    ----------
+    df : pd.DataFrame
+        OHLC de 5 minutos con indice de fechas.
+    ema_fast, ema_slow : int
+        Spans de las EMAs, en barras de `timeframe`.
+    adx_window, atr_window : int
+        Ventanas de ADX y ATR, en barras de `timeframe`.
+    adx_threshold : float
+        Umbral de fuerza de tendencia.
+    timeframe : str
+        Regla de pandas para agregar ("1h", "4h", ...).
+    entry_on_change : bool
+        True: signal solo vale +-1 en la barra de 5 minutos donde la
+        tendencia cambia (evento), y 0 mientras se mantiene. Evita reentrar
+        en la barra siguiente a cada SL/TP dentro de la misma tendencia,
+        que en train era el 85% de los trades y pagaba 0.35% cada vez.
+        False: signal = tendencia (estado) en cada barra.
+
+    Regresa
+    -------
+    pd.DataFrame
+        ema_fast, ema_slow, adx, atr, trend (estado) y signal, con el mismo
+        indice que df.
+    """
+    htf = resample_ohlc(df, timeframe)
+    high, low, close = htf["High"], htf["Low"], htf["Close"]
+    features = pd.DataFrame({
+        "ema_fast": ema(close, ema_fast),
+        "ema_slow": ema(close, ema_slow),
+        "adx": adx(high, low, close, adx_window),
+        "atr": atr(high, low, close, atr_window),
+    })
+    # Sin señal hasta que la EMA lenta tenga historia suficiente (warm-up).
+    features.loc[features.index[:ema_slow - 1], ["ema_fast", "ema_slow"]] = float("nan")
+    features["signal"] = ema_adx_signal(features["ema_fast"], features["ema_slow"],
+                                        features["adx"], adx_threshold)
+    aligned = align_to_base(features, df.index, timeframe)
+    aligned["trend"] = aligned.pop("signal").fillna(0).astype(int)
+    trend = aligned["trend"]
+    aligned["signal"] = trend.where(trend != trend.shift(1), 0) if entry_on_change else trend
+    return aligned
 
 
 def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
