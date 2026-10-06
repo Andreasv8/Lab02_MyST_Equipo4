@@ -1,4 +1,4 @@
-"""Division temporal train/test/validation de lab_02 (SPEC.md, seccion 1).
+"""Division temporal train/test/validation de lab_02 (docs/SPEC.md, seccion 1).
 
 Los periodos son bloques contiguos (sin aleatorizar). Los limites viven solo
 aqui para que el analisis de indicadores, el backtest y los notebooks usen

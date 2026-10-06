@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data import align_to_base, load_btc, resample_ohlc
-from src.strategy import compute_ema_adx_features, ema_adx_signal
+from src.signals import compute_ema_adx_features, ema_adx_signal
 
 DATA = str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")
 

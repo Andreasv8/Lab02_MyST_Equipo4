@@ -27,7 +27,7 @@ from src.backtest import BacktestConfig, BacktestResult, backtest
 from src.metrics import buy_and_hold_equity, calmar_ratio, summarize
 from src.regimes import REGIME_NAMES, RegimeModels, regime_labels
 from src.splits import SPLITS, get_split
-from src.strategy import compute_ema_adx_features
+from src.signals import compute_ema_adx_features
 
 SEED = 42
 N_TRIALS = 500

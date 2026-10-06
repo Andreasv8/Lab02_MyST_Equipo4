@@ -29,7 +29,7 @@ from src.optimization import (
 )
 from src.regimes import fit_regime_models, regime_labels
 from src.splits import SPLITS, get_split
-from src.strategy import compute_ema_adx_features
+from src.signals import compute_ema_adx_features
 
 TEST_END = SPLITS["test"][1]
 DF = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")).loc[:TEST_END]

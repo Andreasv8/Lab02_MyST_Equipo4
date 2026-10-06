@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest import BacktestConfig, backtest
-from src.strategy import COMMISSION_RATE, SLIPPAGE_RATE
+from src.backtest import COMMISSION_RATE, SLIPPAGE_RATE
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 

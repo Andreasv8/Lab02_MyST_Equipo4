@@ -68,15 +68,14 @@ python -m pytest -q
 │   ├── backtest.py
 │   ├── data.py
 │   ├── ema_search.py
-│   ├── indicators.py
 │   ├── metrics.py
 │   ├── optimization.py
 │   ├── plots.py
 │   ├── regime_analysis.py
 │   ├── regimes.py
 │   ├── robust_evaluation.py
+│   ├── signals.py
 │   ├── splits.py
-│   ├── strategy.py
 │   └── walk_forward.py
 └── tests/
     ├── golden/
