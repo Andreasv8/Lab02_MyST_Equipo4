@@ -1,7 +1,7 @@
-"""Pruebas de src/optimization.py y de la parametrizacion de compute_features.
+"""Pruebas de src/optimization.py con la estrategia EMA + ADX.
 
-Datos: NVDA solo hasta el fin de test (src/splits.py); validation no se usa.
-No se corren los 500 trials aqui: los θ por regimen del test de
+Datos: BTC de 5 minutos solo hasta el fin de test (src/splits.py); validation
+no se usa. No se corren los 500 trials aqui: los θ por regimen de la prueba de
 truncamiento estan fijos a mano.
 """
 
@@ -15,49 +15,66 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.data import load_btc
 from src.optimization import (
+    PARAM_SPACE,
     THETA0,
     objective,
     optimize_theta,
+    params_to_theta,
     regime_strategy_inputs,
     run_regime_strategy,
     run_theta,
+    theta_signal,
 )
 from src.regimes import fit_regime_models, regime_labels
 from src.splits import SPLITS, get_split
-from src.strategy import compute_features
+from src.strategy import compute_ema_adx_features
 
 TEST_END = SPLITS["test"][1]
-DF = pd.read_csv(Path(__file__).resolve().parents[1] / "data" / "NVDA_daily.csv",
-                 index_col="Date", parse_dates=True).loc[:TEST_END]
+DF = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")).loc[:TEST_END]
 DF_TRAIN = get_split(DF, "train")
 MODELS = fit_regime_models(DF)
 
-# Cada 40 barras desde la 60, mas la ultima barra.
-T_BARS = list(range(60, len(DF), 40)) + [len(DF) - 1]
+# 8 barras repartidas en train y test, mas la ultima barra.
+T_BARS = list(np.linspace(20_000, len(DF) - 2, 8).astype(int)) + [len(DF) - 1]
 ATOL = 1e-9
 
 # θ por regimen fijos a mano (no optimizados) para probar la estrategia combinada.
 HAND_REGIME_THETAS = {
-    "crisis": {"roc_window": 5, "cmf_window": 30, "adx_threshold": 20.0,
-               "sl_mult": 1.5, "rr": 2.0, "max_holding": 6},
+    "crisis": {**THETA0, "timeframe": "1h", "ema_fast": 9, "ema_slow": 21,
+               "sl_mult": 1.5, "rr": 2.0, "max_holding": 288},
     "trend": THETA0,
     "mean_reversion": None,
 }
 
 
-def test_compute_features_defaults_unchanged():
-    """Con los defaults explicitos el resultado es identico al de siempre."""
-    pd.testing.assert_frame_equal(compute_features(DF),
-                                  compute_features(DF, roc_window=10, cmf_window=20,
-                                                   adx_window=14, adx_threshold=25))
+def test_theta_signal_matches_strategy():
+    """theta_signal de θ0 es la señal y el ATR de compute_ema_adx_features con esos parametros."""
+    signal, atr = theta_signal(DF_TRAIN, THETA0)
+    features = compute_ema_adx_features(DF_TRAIN, ema_fast=12, ema_slow=18, adx_threshold=25.0,
+                                        timeframe="4h", entry_on_change=True)
+    pd.testing.assert_series_equal(signal, features["signal"])
+    pd.testing.assert_series_equal(atr, features["atr"])
 
 
-def test_compute_features_uses_params():
-    """Cambiar la ventana de ROC cambia la columna roc_10 (el nombre se conserva)."""
-    default = compute_features(DF)["roc_10"]
-    short = compute_features(DF, roc_window=5)["roc_10"]
-    assert not np.allclose(default.dropna(), short.loc[default.dropna().index])
+def test_params_to_theta_hand_cases():
+    """slow_ratio -> ema_slow = round(rapida · ratio), siempre > rapida; un θ completo no cambia."""
+    assert params_to_theta({"ema_fast": 12, "slow_ratio": 1.5})["ema_slow"] == 18
+    assert params_to_theta({"ema_fast": 5, "slow_ratio": 1.5})["ema_slow"] == 8
+    assert "slow_ratio" not in params_to_theta({"ema_fast": 12, "slow_ratio": 2.0})
+    assert params_to_theta(THETA0) == THETA0
+
+
+def test_theta0_inside_param_space():
+    """Cada parametro de θ0 cae dentro de su rango de busqueda."""
+    for name, spec in PARAM_SPACE.items():
+        if name == "slow_ratio":
+            assert spec[1] <= THETA0["ema_slow"] / THETA0["ema_fast"] <= spec[2]
+        elif spec[0] == "cat":
+            assert THETA0[name] in spec[1]
+        else:
+            assert spec[1] <= THETA0[name] <= spec[2]
 
 
 def test_objective_discards_few_trades():
@@ -81,9 +98,10 @@ def test_regime_inputs_follow_regime():
     off = inputs["regime"].isna() | (inputs["regime"] == "mean_reversion")
     assert (inputs.loc[off, "signal"] == 0).all()
     crisis = inputs["regime"] == "crisis"
+    assert crisis.any()
     assert (inputs.loc[crisis, "sl_mult"] == 1.5).all()
     assert (inputs.loc[crisis, "tp_mult"] == 3.0).all()
-    assert (inputs.loc[crisis, "max_holding"] == 6).all()
+    assert (inputs.loc[crisis, "max_holding"] == 288).all()
 
 
 FULL_INPUTS = regime_strategy_inputs(DF, MODELS, HAND_REGIME_THETAS)
@@ -114,7 +132,6 @@ def test_optimize_theta_reproducible():
     runs = [optimize_theta(DF_TRAIN, min_trades=5, n_trials=8, n_startup_trials=4) for _ in range(2)]
     assert runs[0].best_params == runs[1].best_params
     assert runs[0].best_value == runs[1].best_value
-
 
 
 def test_theta_table_hand_thetas():

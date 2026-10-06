@@ -39,7 +39,7 @@ DF = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_tr
 MODELS = [fit_block_models(DF, block.fit_end) for block in BLOCKS]
 
 # θ con salida distinta de θ0 para que el backtest no sea el de siempre.
-THETA = {**THETA0, "sl_mult": 1.5, "rr": 2.0, "max_holding": 7}
+THETA = {**THETA0, "sl_mult": 1.5, "rr": 2.0, "max_holding": 288}
 REGIMES = [None, "crisis", "trend", "mean_reversion"]
 BLOCK_IDS = range(len(BLOCKS))
 
@@ -63,9 +63,10 @@ def _assert_models_equal(a, b):
     assert a.hmm_names == b.hmm_names
     assert a.hmm_choice == b.hmm_choice
     # El EM del HMM usa BLAS multihilo y el orden de las sumas puede variar entre
-    # corridas (diferencias relativas ~1e-12); un look-ahead real daria diferencias grandes.
+    # corridas (diferencias relativas ~1e-9, absolutas ~1e-12, p. ej. en probabilidades
+    # iniciales de 1e-107); un look-ahead real daria diferencias grandes.
     for attr in ["startprob_", "transmat_", "means_", "covars_"]:
-        np.testing.assert_allclose(getattr(a.hmm, attr), getattr(b.hmm, attr), rtol=1e-9, atol=0)
+        np.testing.assert_allclose(getattr(a.hmm, attr), getattr(b.hmm, attr), rtol=1e-9, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -126,11 +127,18 @@ def test_sliced_backtest_matches_masked_full_backtest(i, regime):
 
 
 def test_regime_entries_only_in_regime():
-    """Con regime = trend, toda entrada tiene etiqueta trend en la barra de señal."""
-    data = prepare_block(DF, BLOCKS[2], MODELS[2])
-    trades = run_block(data, THETA, "trend").trades
-    assert len(trades) > 0
-    assert (data.labels.iloc[trades["entry_bar"] - 1] == "trend").all()
+    """Con regime = trend, toda entrada tiene etiqueta trend en la barra de señal.
+
+    Con entradas solo al cambiar la tendencia de 4h hay pocos trades por bloque,
+    asi que se exige al menos uno en los 3 bloques juntos.
+    """
+    n_trades = 0
+    for block, models in zip(BLOCKS, MODELS):
+        data = prepare_block(DF, block, models)
+        trades = run_block(data, THETA, "trend").trades
+        assert (data.labels.iloc[trades["entry_bar"] - 1] == "trend").all()
+        n_trades += len(trades)
+    assert n_trades > 0
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +196,8 @@ def test_plateau_hand_case():
     assert theta["sl_mult"] == pytest.approx(1.4)
     assert theta["rr"] == pytest.approx(2.5)
     assert theta["max_holding"] == 13
-    assert {k: theta[k] for k in ["roc_window", "cmf_window", "adx_threshold"]} == \
-        {k: THETA0[k] for k in ["roc_window", "cmf_window", "adx_threshold"]}
+    signal_params = ["timeframe", "ema_fast", "ema_slow", "adx_threshold", "entry_on_change"]
+    assert {k: theta[k] for k in signal_params} == {k: THETA0[k] for k in signal_params}
 
 
 def test_plateau_median_odd_top():
@@ -221,8 +229,8 @@ def test_operates_rule(best, expected):
 # Estrategia combinada por regimen en el walk-forward (aclaracion 10)
 # ---------------------------------------------------------------------------
 
-THETA_CRISIS = {**THETA0, "sl_mult": 1.2, "rr": 2.5, "max_holding": 5}
-THETA_TREND = {**THETA0, "sl_mult": 2.8, "rr": 1.9, "max_holding": 13}
+THETA_CRISIS = {**THETA0, "sl_mult": 1.2, "rr": 2.5, "max_holding": 144}
+THETA_TREND = {**THETA0, "sl_mult": 2.8, "rr": 1.9, "max_holding": 576}
 COMBINED = {"crisis": THETA_CRISIS, "trend": THETA_TREND, "mean_reversion": None}
 BLOCKS_DATA = [prepare_block(DF, block, models) for block, models in zip(BLOCKS, MODELS)]
 

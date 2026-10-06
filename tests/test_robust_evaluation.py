@@ -45,11 +45,13 @@ def test_drop_table_reads_calmar_columns():
 
 
 def test_edge_params_hand_case():
-    """10% del ancho: sl 2.80 en [1,3] -> borde (0.2 de 3); 2.79 no; hold 5 y 6.5 en [5,20] -> borde; 7 no."""
+    """10% del ancho de PARAM_SPACE: sl 3.70 en [1,4] -> borde (0.3 de 4), 3.69 no;
+    rr 2.9 en [1,20] -> borde (1.9 de 1), 10 no; hold 48 y 446 en [48,4032] -> borde
+    (398 <= 398.4), 447 no."""
     thetas = {
-        "a": {**THETA0, "sl_mult": 2.80, "rr": 2.0, "max_holding": 5},
-        "b": {**THETA0, "sl_mult": 2.79, "rr": 1.2, "max_holding": 7},
-        "c": {**THETA0, "sl_mult": 2.0, "rr": 2.0, "max_holding": 6.5},
+        "a": {**THETA0, "sl_mult": 3.70, "rr": 10.0, "max_holding": 48},
+        "b": {**THETA0, "sl_mult": 3.69, "rr": 2.9, "max_holding": 447},
+        "c": {**THETA0, "sl_mult": 2.0, "rr": 10.0, "max_holding": 446},
         "off": None,
     }
     edge = edge_params(thetas)["en_borde"]

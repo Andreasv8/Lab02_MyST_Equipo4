@@ -1,8 +1,11 @@
 """Optimizacion de parametros de la estrategia de lab_02 (Act 07, punto 7).
 
-θ = (ma_slow, donchian_window, atr_mult, sl_mult, rr, max_holding), con
-tp_mult = sl_mult · rr. ATR(14), ρ = 1% y costos quedan FIJOS: no son
-parametros de la señal.
+Estrategia: cruce de EMAs con filtro ADX, calculada en barras de 1h/4h y
+ejecutada en barras de 5 minutos (compute_ema_adx_features).
+
+θ = (timeframe, ema_fast, ema_slow, adx_threshold, entry_on_change, sl_mult,
+rr, max_holding), con tp_mult = sl_mult · rr. ADX(14), ATR(14) del timeframe,
+ρ = 1% y costos quedan FIJOS. max_holding esta en barras de 5 minutos.
 
 Se optimiza SOLO con train y de dos formas:
 - θ* unico: maximiza J(backtest(train, θ)).
@@ -24,66 +27,78 @@ from src.backtest import BacktestConfig, BacktestResult, backtest
 from src.metrics import buy_and_hold_equity, calmar_ratio, summarize
 from src.regimes import REGIME_NAMES, RegimeModels, regime_labels
 from src.splits import SPLITS, get_split
-from src.strategy import compute_features
+from src.strategy import compute_ema_adx_features
 
 SEED = 42
 N_TRIALS = 500
 N_STARTUP_TRIALS = 150
 MIN_TRADES = 20          # θ* unico
 MIN_TRADES_REGIME = 10   # θ*_j por regimen
+BARS_PER_HOUR = 12
 
-# Parametros base, en barras de 5 minutos: EMA lenta y Donchian de 1 dia (288), banda de
-# 3 ATR, SL 12·ATR, TP 24·ATR (rr 2), holding maximo 1 dia.
+# θ0 = θ robusta elegida SOLO con train (src/ema_search.py): centro de la meseta
+# del top 10% de 300 trials de Optuna, con ADX = 25 (Wilder) porque ADX ~27 era
+# un pico aislado, y sin take-profit efectivo (rr = 20) porque Calmar crece
+# monotono con rr. En train: +28.6%, Sharpe 2.0, max DD -11.9%, Calmar 2.6,
+# 46 trades; 96% de las 108 θ vecinas tienen retorno > 0.
 THETA0 = {
-    "ma_slow": 288,
-    "donchian_window": 288,
-    "atr_mult": 3.0,
-    "sl_mult": 12.0,
-    "rr": 2.0,
-    "max_holding": 288,
+    "timeframe": "4h",
+    "ema_fast": 12,
+    "ema_slow": 18,
+    "adx_threshold": 25.0,
+    "entry_on_change": True,
+    "sl_mult": 3.0,
+    "rr": 20.0,
+    "max_holding": 5 * 24 * BARS_PER_HOUR,   # 5 dias
 }
 
-# Espacio de busqueda: nombre -> (tipo, minimo, maximo).
-# Escala: el ATR(14) de 5 minutos mide ~0.08% del precio y la comision de ida y vuelta
-# es 0.25%. Con SL/TP de 1 a 3 ATR ningun trade puede cubrir la comision, asi que las
-# salidas se buscan entre 4 y 30 ATR y las ventanas entre 4 horas y 4 dias.
+# Espacio de busqueda: nombre -> ("cat", opciones) o (tipo, minimo, maximo).
+# ema_slow no se busca directo: ema_slow = round(ema_fast · slow_ratio) > ema_fast.
+# sl_mult esta en ATR del timeframe (el ATR de 4h es ~0.5% del precio, contra un
+# costo de ida y vuelta de 0.35%). rr llega a 20 (~sin TP): con tope 10 el mejor
+# trial quedaba en el borde (9.6).
 PARAM_SPACE = {
-    "ma_slow": ("int", 48, 1152),          # 4 horas a 4 dias
-    "donchian_window": ("int", 48, 1152),  # 4 horas a 4 dias
-    "atr_mult": ("float", 1.0, 8.0),
-    "sl_mult": ("float", 4.0, 30.0),
-    "rr": ("float", 1.0, 4.0),
-    "max_holding": ("int", 36, 864),       # 3 horas a 3 dias
+    "timeframe": ("cat", ["1h", "4h"]),
+    "ema_fast": ("int", 5, 60),
+    "slow_ratio": ("float", 1.5, 5.0),
+    "adx_threshold": ("float", 15.0, 35.0),
+    "entry_on_change": ("cat", [True, False]),
+    "sl_mult": ("float", 1.0, 4.0),
+    "rr": ("float", 1.0, 20.0),
+    "max_holding": ("int", 4 * BARS_PER_HOUR, 14 * 24 * BARS_PER_HOUR),   # 4 horas a 14 dias
 }
 
 # Metricas de summarize que suponen un sl/tp escalar (no aplican si cambian por regimen).
 SCALAR_EXIT_METRICS = ["p_star", "p_star_cost", "k_mean"]
 
 
-def ma_windows(ma_slow: int) -> tuple[int, int]:
-    """Ventanas (rapida, lenta) de las medias moviles: la rapida es 1/4 de la lenta.
+def params_to_theta(params: dict) -> dict:
+    """Convierte parametros de Optuna (con slow_ratio) en θ (con ema_slow).
 
-    Ejemplo: ma_slow = 48 -> (12, 48); ma_slow = 288 -> (72, 288).
+    Si params ya trae ema_slow (θ completo), lo regresa sin cambios.
     """
-    return max(2, round(ma_slow / 4)), ma_slow
+    if "slow_ratio" not in params:
+        return dict(params)
+    theta = {k: v for k, v in params.items() if k != "slow_ratio"}
+    theta["ema_slow"] = max(int(params["ema_fast"]) + 1,
+                            round(params["ema_fast"] * params["slow_ratio"]))
+    return theta
 
 
 def theta_signal(df: pd.DataFrame, theta: dict) -> tuple[pd.Series, pd.Series]:
-    """Señal de confirmacion 2 de 3 con las ventanas/umbral de θ y el ATR(14) fijo.
-
-    Las medias moviles se controlan con un solo parametro, ma_slow: la EMA
-    rapida siempre es 1/4 de la lenta (ma_windows).
+    """Señal EMA + ADX y ATR del timeframe de θ, alineados a las barras de 5 minutos.
 
     Regresa
     -------
     tuple[pd.Series, pd.Series]
-        (señal 1/-1/0 por barra, ATR(14) por barra).
+        (señal 1/-1/0 por barra, ATR(14) del timeframe por barra).
     """
-    fast, slow = ma_windows(int(theta["ma_slow"]))
-    features = compute_features(df, ma_fast=fast, ma_slow=slow,
-                                donchian_window=int(theta["donchian_window"]),
-                                atr_mult=theta["atr_mult"])
-    return features["signal"], features["atr_14"]
+    features = compute_ema_adx_features(df, ema_fast=int(theta["ema_fast"]),
+                                        ema_slow=int(theta["ema_slow"]),
+                                        adx_threshold=theta["adx_threshold"],
+                                        timeframe=theta["timeframe"],
+                                        entry_on_change=bool(theta["entry_on_change"]))
+    return features["signal"], features["atr"]
 
 
 def theta_config(theta: dict) -> BacktestConfig:
@@ -98,9 +113,9 @@ def run_theta(df: pd.DataFrame, theta: dict, allowed: Optional[pd.Series] = None
     Parametros
     ----------
     df : pd.DataFrame
-        OHLCV con indice de fechas.
+        OHLC de 5 minutos con indice de fechas.
     theta : dict
-        Parametros (ver PARAM_SPACE).
+        Parametros (ver THETA0).
     allowed : pd.Series, opcional
         Booleana por barra. Donde es False la señal se pone en 0. Como el
         motor ejecuta en t la señal de t-1, solo hay ENTRADAS cuando la barra
@@ -132,19 +147,27 @@ def objective(result: BacktestResult, min_trades: int) -> float:
 
 
 def suggest_theta(trial: optuna.Trial) -> dict:
-    """Propone un θ dentro de PARAM_SPACE (enteros donde aplica)."""
-    theta = {}
-    for name, (kind, low, high) in PARAM_SPACE.items():
-        if kind == "int":
-            theta[name] = trial.suggest_int(name, low, high)
+    """Propone un θ dentro de PARAM_SPACE; ema_slow sale de slow_ratio (params_to_theta)."""
+    params = {}
+    for name, spec in PARAM_SPACE.items():
+        if spec[0] == "cat":
+            params[name] = trial.suggest_categorical(name, spec[1])
+        elif spec[0] == "int":
+            params[name] = trial.suggest_int(name, spec[1], spec[2])
         else:
-            theta[name] = trial.suggest_float(name, low, high)
-    return theta
+            params[name] = trial.suggest_float(name, spec[1], spec[2])
+    return params_to_theta(params)
+
+
+def best_theta(study: optuna.Study) -> dict:
+    """θ del mejor trial del estudio (con ema_slow en vez de slow_ratio)."""
+    return params_to_theta(study.best_params)
 
 
 def optimize_theta(df_train: pd.DataFrame, min_trades: int, allowed: Optional[pd.Series] = None,
                    n_trials: int = N_TRIALS, n_startup_trials: int = N_STARTUP_TRIALS,
-                   seed: int = SEED, study_name: Optional[str] = None) -> optuna.Study:
+                   seed: int = SEED, study_name: Optional[str] = None,
+                   enqueue: Optional[list] = None) -> optuna.Study:
     """Maximiza J sobre train con Optuna: random search y despues TPE (bayesiano).
 
     TPESampler(n_startup_trials=150, seed=42):
@@ -160,22 +183,27 @@ def optimize_theta(df_train: pd.DataFrame, min_trades: int, allowed: Optional[pd
     Parametros
     ----------
     df_train : pd.DataFrame
-        OHLCV de train unicamente.
+        OHLC de 5 minutos de train unicamente.
     min_trades : int
         Minimo de trades para que J sea valido.
     allowed : pd.Series, opcional
         Barras de señal permitidas (ver run_theta).
     n_trials, n_startup_trials, seed : int
         Presupuesto de busqueda y semilla.
+    enqueue : list[dict], opcional
+        Parametros (formato de PARAM_SPACE, con slow_ratio) a evaluar primero.
 
     Regresa
     -------
     optuna.Study
-        Estudio completo (best_params, best_value, trials).
+        Estudio completo (best_params, best_value, trials). Usar best_theta
+        para obtener θ con ema_slow.
     """
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     sampler = optuna.samplers.TPESampler(n_startup_trials=n_startup_trials, seed=seed)
     study = optuna.create_study(direction="maximize", sampler=sampler, study_name=study_name)
+    for params in enqueue or []:
+        study.enqueue_trial(params)
     study.optimize(lambda trial: objective(run_theta(df_train, suggest_theta(trial), allowed),
                                            min_trades),
                    n_trials=n_trials)
@@ -237,9 +265,9 @@ def optimize_all(df: pd.DataFrame, models: RegimeModels, n_trials: int = N_TRIAL
                                study_name=name)
         studies[name] = study
         regime_j[name] = study.best_value
-        regime_thetas[name] = study.best_params if study.best_value > 0 else None
+        regime_thetas[name] = best_theta(study) if study.best_value > 0 else None
 
-    return OptimizationResult(theta_star=studies["global"].best_params,
+    return OptimizationResult(theta_star=best_theta(studies["global"]),
                               j_star=studies["global"].best_value,
                               regime_thetas=regime_thetas, regime_j=regime_j, studies=studies)
 
@@ -360,7 +388,7 @@ def theta_table(df: pd.DataFrame, models: RegimeModels, opt: OptimizationResult)
     rows["θ0"] = _row(THETA0, None, MIN_TRADES, True)
     rows["θ*"] = _row(opt.theta_star, None, MIN_TRADES, True)
     for name in REGIME_NAMES:
-        best = opt.studies[name].best_params if name in opt.studies else opt.regime_thetas[name]
+        best = best_theta(opt.studies[name]) if name in opt.studies else opt.regime_thetas[name]
         rows[f"θ*_{name}"] = _row(best, labels == name, MIN_TRADES_REGIME,
                                   opt.regime_thetas[name] is not None)
     return pd.DataFrame.from_dict(rows, orient="index")

@@ -1,7 +1,7 @@
 """Optimizacion robusta walk-forward de lab_02 (Act 07 v2, ACT07_ROBUST.md).
 
-La señal queda fija en θ0 (ROC 10, CMF 20, ADX 14 > 25) y solo se optimiza la
-salida (sl_mult, rr, max_holding). J = Calmar de la equity fuera de muestra:
+La señal queda fija en θ0 (EMA 12/18 en 4h, ADX 14 > 25, entrada al cambiar
+la tendencia) y solo se optimiza la salida (sl_mult, rr, max_holding). J = Calmar de la equity fuera de muestra:
 los 3 tramos de evaluacion del walk-forward (ventana creciente dentro de
 train) encadenados.
 
