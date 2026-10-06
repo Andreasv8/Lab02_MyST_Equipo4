@@ -11,11 +11,10 @@ TRAIN_PATH = "data/btc_project_train.csv"
 TEST_PATH = "data/btc_project_test.csv"
 
 SPLITS = {
-    "train": ("2022-06-01", "2023-12-30"),
-    # El archivo de test trae un dia suelto (2023-12-31) y un hueco de 122 dias.
-    # Se usa solo el tramo continuo de mayo de 2024.
-    "test": ("2024-05-02", "2024-06-03"),
-    "validation": ("2024-06-04", "2024-12-31"),
+    "train": ("2022-06-01", "2023-05-14"),
+    "test": ("2023-05-15", "2023-09-06"),
+    "validation": ("2023-09-07", "2023-12-31"),
+    "final": ("2024-05-02", "2024-06-03"),
 }
 
 

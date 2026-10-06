@@ -48,6 +48,15 @@ def macd_line(close: pd.Series, fast: int = 12, slow: int = 26) -> pd.Series:
     """Linea MACD: EMA rapida menos EMA lenta."""
     return ema(close, fast) - ema(close, slow)
 
+def macd_histogram(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
+    """Histograma del MACD: linea MACD menos su linea de señal (EMA de la linea MACD).
+
+    > 0 = el impulso alcista se acelera; < 0 = se acelera el bajista.
+    NaN hasta tener `slow` barras, para no votar con medias sin calentar.
+    """
+    line = macd_line(close, fast, slow)
+    hist = line - ema(line, signal)
+    return hist.where(close.rolling(window=slow).count() >= slow)
 
 def stochastic_percent_k(high: pd.Series, low: pd.Series, close: pd.Series,
                           window: int = 14, smooth: int = 3) -> pd.Series:
@@ -135,11 +144,11 @@ def williams_r(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 
     return (highest_high - close) / (highest_high - lowest_low) * -100
 
 
-def adx(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
-    """ADX (Average Directional Index) con suavizado de Wilder.
+def directional_indicators(high: pd.Series, low: pd.Series, close: pd.Series,
+                           window: int = 14) -> tuple[pd.Series, pd.Series]:
+    """+DI y -DI de Wilder: la DIRECCION del movimiento, en [0, 100].
 
-    Mide la FUERZA de la tendencia (0-100), no su direccion:
-    +DM/-DM y True Range suavizados -> +DI/-DI -> DX -> ADX (DX suavizado).
+    +DI > -DI = dominan las subidas; -DI > +DI = dominan las bajadas.
     """
     up_move = high.diff()
     down_move = -low.diff()
@@ -150,10 +159,14 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> 
     smoothed_tr = true_range(high, low, close).ewm(alpha=alpha, adjust=False, min_periods=window).mean()
     plus_di = 100 * plus_dm.ewm(alpha=alpha, adjust=False, min_periods=window).mean() / smoothed_tr
     minus_di = 100 * minus_dm.ewm(alpha=alpha, adjust=False, min_periods=window).mean() / smoothed_tr
+    return plus_di, minus_di
 
+
+def adx(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+    """ADX con suavizado de Wilder: FUERZA de la tendencia (0-100), no su direccion."""
+    plus_di, minus_di = directional_indicators(high, low, close, window)
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-    return dx.ewm(alpha=alpha, adjust=False, min_periods=window).mean()
-
+    return dx.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
 
 def chaikin_money_flow(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series,
                        window: int = 20) -> pd.Series:
