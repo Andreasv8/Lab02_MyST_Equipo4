@@ -22,6 +22,7 @@ import optuna
 import pandas as pd
 
 from src.backtest import COMMISSION_RATE, BacktestResult, backtest, config_from_params
+from src.data import TEST_END, TEST_START
 from src.metrics import break_even_cost, calmar_ratio
 from src.regimes import HOURS_PER_MONTH, REGIME_NAMES, hourly, rule_regimes
 from src.signals import THETA0, compute_strategy
@@ -594,3 +595,67 @@ def transitions_table(inputs: pd.DataFrame, trades: pd.DataFrame, results: list[
     rows["total"] = {"transitions_in_per_month": changed.sum() / months,
                      "regime_exits": len(exits), "r5_windows": sum(r["r5_windows"] for r in rows.values())}
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis("regime")
+
+
+# ---------------------------------------------------------------------------
+# 6. Evaluacion final en el archivo de test (docs/SPEC.md, seccion 13)
+# ---------------------------------------------------------------------------
+
+def paste_train_test(df_train: pd.DataFrame, df_test: pd.DataFrame) -> pd.DataFrame:
+    """Pega train y test en una sola serie ordenada.
+
+    Los dos archivos comparten la barra 2023-12-31 00:00; se queda la de train
+    (el archivo con el que se ajusto todo).
+    """
+    pasted = pd.concat([df_train, df_test]).sort_index(kind="stable")
+    return pasted[~pasted.index.duplicated(keep="first")]
+
+
+def final_test_inputs(df_train: pd.DataFrame, df_test: pd.DataFrame, final: dict, use_regimes: bool = True,
+                      test_start: str = TEST_START, test_end: str = TEST_END) -> pd.DataFrame:
+    """Entradas por barra de la evaluacion final, tal como dice docs/SPEC.md, seccion 13.
+
+    - Se pegan train y test; indicadores y regimenes se calculan sobre la
+      serie pegada (solo usan el pasado).
+    - El umbral de regimen se ajusta con todo train (fit_end = ultima barra de train).
+    - Con use_regimes cada barra usa θ_final de su regimen (R5: si un regimen
+      no tiene θ_final, usa el global) y force_exit marca el cambio a crisis
+      (R3). Sin use_regimes, toda la ventana usa θ_final global.
+    - Solo se regresan las barras de test_start a test_end: el backtest no
+      ve nada antes y no puede haber entradas antes de test_start.
+
+    Limitacion: la ventana de regimen de 1 semana cuenta barras, no tiempo.
+    Por el hueco de 122 dias, en la primera semana de mayo de 2024 esa ventana
+    todavia incluye barras del 31 de diciembre de 2023; lo mismo pasa con las
+    velas de 4h, las EMAs y el ATR justo despues del hueco. Es causal (solo
+    usa el pasado), pero mezcla dos epocas distintas del mercado.
+
+    Recibe train, test y θ_final por estudio ({"global", "crisis", ...}).
+    Regresa la tabla por barra (regime, signal, atr, sl_mult, tp_mult,
+    max_holding, rho, force_exit) indexada por las barras de test.
+    """
+    pasted = paste_train_test(df_train, df_test)
+    labels, _ = rule_regimes(pasted, df_train.index[-1])
+    test_index = pasted.loc[test_start:test_end].index
+
+    inputs = empty_inputs(labels.loc[test_index])
+    for name in (REGIME_NAMES if use_regimes else ["global"]):
+        theta = final[name] if final.get(name) is not None else final["global"]
+        features = compute_strategy(pasted, theta).loc[test_index]
+        bars = test_index if name == "global" else test_index[(inputs["regime"] == name).to_numpy()]
+        inputs = fill_inputs(inputs, bars, features, theta)
+    inputs["force_exit"] = crisis_entries(inputs["regime"]) if use_regimes else False
+    return inputs
+
+
+def run_final_test(df_train: pd.DataFrame, df_test: pd.DataFrame, final: dict,
+                   capital: float = CAPITAL) -> tuple[dict, dict]:
+    """Corre la evaluacion final: curva con regimen y curva solo global (un backtest cada una).
+
+    Regresa ({nombre: BacktestResult}, {nombre: entradas por barra}).
+    """
+    pasted = paste_train_test(df_train, df_test)
+    inputs = {"con régimen": final_test_inputs(df_train, df_test, final, use_regimes=True),
+              "solo global": final_test_inputs(df_train, df_test, final, use_regimes=False)}
+    curves = {name: run_oos(pasted, table, capital) for name, table in inputs.items()}
+    return curves, inputs

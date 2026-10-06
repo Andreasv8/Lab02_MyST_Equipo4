@@ -82,10 +82,12 @@ python -m pytest -q
     ├── test_confirmation.py
     ├── test_data.py
     ├── test_execution.py
+    ├── test_final_test.py
     ├── test_metrics.py
     ├── test_optimize.py
     ├── test_plots.py
-    └── test_regimes.py
+    ├── test_regimes.py
+    └── test_robustness.py
 ```
 
 ## Uso de herramientas de IA

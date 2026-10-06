@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.metrics import returns_table
 from src.plots import (plot_correlation, plot_cost_curve, plot_drawdown, plot_feature_distributions,
-                       plot_portfolio, plot_portfolio_regimes, plot_regime_timeline,
+                       plot_portfolio, plot_portfolio_panels, plot_portfolio_regimes, plot_regime_timeline,
                        plot_returns_table, plot_sensitivity)
 
 INDEX = pd.date_range("2022-08-01", "2023-12-24", freq="6h")
@@ -75,3 +75,11 @@ def test_regime_figures_have_labels():
     assert fig.legends and fig.axes[0].get_xlabel()
     fig = plot_portfolio_regimes(EQUITY, REGIMES, BENCHMARK, "Portafolio con régimen")
     _check_axes(fig.axes[0])
+
+
+def test_portfolio_panels_have_labels():
+    panels = {"Train OOS": ({"con régimen": EQUITY}, BENCHMARK), "Test": ({"solo global": EQUITY}, BENCHMARK)}
+    fig = plot_portfolio_panels(panels)
+    assert len(fig.axes) == 2
+    for ax in fig.axes:
+        _check_axes(ax)

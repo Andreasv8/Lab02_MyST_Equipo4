@@ -365,3 +365,25 @@ def plot_portfolio_regimes(equity: pd.Series, regimes: pd.Series, benchmark: pd.
     _style(ax)
     fig.tight_layout()
     return fig
+
+
+def plot_portfolio_panels(panels: dict) -> plt.Figure:
+    """Valor del portafolio en varios periodos, un panel por periodo, cada uno con buy & hold.
+
+    Recibe {titulo del panel: (curvas {nombre: equity}, equity del buy & hold)}.
+    Regresa la figura.
+    """
+    fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5), squeeze=False)
+    for ax, (title, (curves, benchmark)) in zip(axes[0], panels.items()):
+        ax.plot(benchmark.index, benchmark, color=BENCHMARK_COLOR, linewidth=1.5, label="buy & hold")
+        for name, equity in curves.items():
+            ax.plot(equity.index, equity, color=CURVE_COLORS.get(name, STRATEGY_COLOR), linewidth=1.8, label=name)
+        ax.set_title(title)
+        ax.set_xlabel("Fecha")
+        ax.set_ylabel("Valor del portafolio (USD)")
+        ax.tick_params(axis="x", rotation=30)
+        _usd(ax)
+        ax.legend(loc="upper left", frameon=False)
+        _style(ax)
+    fig.tight_layout()
+    return fig
