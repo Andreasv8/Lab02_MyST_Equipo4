@@ -70,7 +70,6 @@ python -m pytest -q
 │   ├── metrics.py
 │   ├── optimization.py
 │   ├── plots.py
-│   ├── regime_analysis.py
 │   ├── regimes.py
 │   ├── robust_evaluation.py
 │   ├── signals.py
@@ -88,7 +87,6 @@ python -m pytest -q
     ├── test_execution.py
     ├── test_metrics.py
     ├── test_optimization.py
-    ├── test_regime_analysis.py
     ├── test_regimes.py
     ├── test_robust_evaluation.py
     ├── test_signals.py
