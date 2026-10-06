@@ -30,6 +30,7 @@ from src.splits import get_split
 
 TRADING_DAYS = 252
 WINDOW = 7 * BARS_PER_DAY               # una semana de barras de 5 minutos
+UPDATE_MINUTE = 0                       # el regimen se actualiza en la barra hh:00 (cada hora)
 REGIME_COLUMNS = ["volatility", "trend_r2", "autocorr_1"]
 REGIME_NAMES = ["crisis", "trend", "mean_reversion"]
 SEED = 42
@@ -121,14 +122,18 @@ def hourly(features: pd.DataFrame) -> pd.DataFrame:
     """Filas de las barras hh:00: el paso de tiempo de los clasificadores.
 
     Por que: con barras de 5 minutos el HMM cambiaria de estado por ruido;
-    a una hora por paso las duraciones esperadas son interpretables.
+    a una hora por paso las duraciones esperadas son interpretables (el
+    Lab 02 pide actualizar la clasificacion cada 1 a 6 horas). Se usa el
+    reloj (minuto UPDATE_MINUTE) y no "cada 12 filas" para que la barra
+    elegida no dependa de donde empieza el DataFrame ni de los huecos.
     """
-    return features[features.index.minute == 0]
+    return features[features.index.minute == UPDATE_MINUTE]
 
 
 def to_bars(labels: pd.Series, index: pd.Index) -> pd.Series:
     """Lleva etiquetas horarias a todas las barras: cada barra toma la de la ultima hh:00 <= t.
 
+    La etiqueta de las 10:00 se usa de 10:00 a 10:55 y cambia hasta las 11:00.
     Es causal: la barra t solo ve la etiqueta de una hora ya cerrada en t.
     """
     return labels.reindex(index, method="ffill")
