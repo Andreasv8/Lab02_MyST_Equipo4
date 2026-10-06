@@ -1,13 +1,18 @@
 """Pruebas de la señal (Lab 02, seccion 3.7): causalidad y regla de confirmacion 2 de 3."""
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from src.data import load_btc
 from src.strategy import MIN_VOTES, compute_features, confirmation_signal, indicator_votes
 
-DATA = "data/btc_project_train.csv"
+DATA = str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")
 
 
 def _votes(rows):

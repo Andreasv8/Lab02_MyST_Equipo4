@@ -1,13 +1,18 @@
 """Pruebas de la estrategia 2 (EMA + ADX en timeframe mayor): regla, remuestreo y causalidad."""
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from src.data import align_to_base, load_btc, resample_ohlc
 from src.strategy import compute_ema_adx_features, ema_adx_signal
 
-DATA = "data/btc_project_train.csv"
+DATA = str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")
 
 
 def test_ema_adx_rule():

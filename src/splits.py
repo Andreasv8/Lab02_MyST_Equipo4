@@ -5,10 +5,13 @@ aqui para que el analisis de indicadores, el backtest y los notebooks usen
 exactamente las mismas fechas.
 """
 
+from pathlib import Path
+
 import pandas as pd
 
-TRAIN_PATH = "data/btc_project_train.csv"
-TEST_PATH = "data/btc_project_test.csv"
+ROOT = Path(__file__).resolve().parents[1]
+TRAIN_PATH = str(ROOT / "data" / "btc_project_train.csv")
+TEST_PATH = str(ROOT / "data" / "btc_project_test.csv")
 
 SPLITS = {
     "train": ("2022-06-01", "2023-05-14"),
