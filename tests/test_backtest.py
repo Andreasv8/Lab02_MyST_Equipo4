@@ -49,7 +49,8 @@ def test_golden_long_tp_then_short_tp():
     scenario = pd.read_csv(GOLDEN_DIR / "backtest_scenario.csv", index_col="Date", parse_dates=True)
     df = scenario[["Open", "High", "Low", "Close"]]
     config = BacktestConfig(initial_cash=10_000, rho=0.01, sl_mult=2, tp_mult=3, max_holding=10,
-                            cost_rate=0.001, borrow_fee_annual=0.005)
+                            commission_rate=0.001, slippage_rate=0.0,
+                            borrow_fee_annual=0.005)
 
     result = backtest(df, scenario["signal"], scenario["atr"], config)
 
@@ -73,7 +74,8 @@ def test_per_bar_exit_params_fixed_at_entry():
     scenario = pd.read_csv(GOLDEN_DIR / "backtest_scenario.csv", index_col="Date", parse_dates=True)
     df = scenario[["Open", "High", "Low", "Close"]]
     config = BacktestConfig(initial_cash=10_000, rho=0.01, sl_mult=2, tp_mult=3, max_holding=10,
-                            cost_rate=0.001, borrow_fee_annual=0.005)
+                            commission_rate=0.001, slippage_rate=0.0,
+                            borrow_fee_annual=0.005)
     tp_mult = pd.Series([5, 1, 1, 1, 1], index=df.index, dtype=float)
     max_holding = pd.Series([2, 1, 1, 1, 1], index=df.index)
 
@@ -97,7 +99,7 @@ def test_accounting_identities_with_lab_costs():
     scenario = pd.read_csv(GOLDEN_DIR / "backtest_scenario.csv", index_col="Date", parse_dates=True)
     df = scenario[["Open", "High", "Low", "Close"]]
     config = BacktestConfig()
-    assert (COMMISSION_RATE, SLIPPAGE_RATE) == (0.00125, 0.0005)
+    assert (COMMISSION_RATE, SLIPPAGE_RATE) == (0.00125, 0.0)
     assert (config.initial_cash, config.cost_rate, config.borrow_fee_annual) == \
         (1_000_000.0, COMMISSION_RATE + SLIPPAGE_RATE, 0.0)
 

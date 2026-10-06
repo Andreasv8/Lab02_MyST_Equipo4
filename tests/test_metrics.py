@@ -147,7 +147,7 @@ def test_summarize_sub_period_rebases_and_filters_trades():
         {"entry_date": dates[1], "exit_date": dates[4], "pnl": 8.0, "shares": 2,
          "raw_entry_price": 100.0, "raw_exit_price": 105.0},
     ])
-    config = BacktestConfig(initial_cash=10_000, cost_rate=0.001)
+    config = BacktestConfig(initial_cash=10_000, commission_rate=0.001, slippage_rate=0.0)
 
     summary = summarize(equity_df, trades, config, start=dates[3], end=dates[5])
 
