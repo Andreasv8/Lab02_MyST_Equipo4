@@ -41,16 +41,18 @@ def _trades(rows: list[dict]) -> pd.DataFrame:
 
 
 def test_returns_drawdown_cagr_calmar_by_hand():
-    """equity [100, 110, 99, 121]: DD = 99/110 - 1 = -10%, CAGR = 1.21^(252/3) - 1, Calmar = CAGR/0.10."""
+    """equity [100, 110, 99, 121]: DD = 99/110 - 1 = -10%.
+
+    Con periods = 3 las 3 barras son un año: CAGR = 1.21 - 1 = 21%, Calmar = 0.21/0.10.
+    """
     equity = pd.Series([100.0, 110.0, 99.0, 121.0], index=_dates(4))
 
     assert returns(equity).tolist() == pytest.approx([0.1, -0.1, 22 / 99])
     assert drawdown_series(equity).tolist() == pytest.approx([0.0, 0.0, -0.1, 0.0])
     assert max_drawdown(equity) == pytest.approx(-0.10)
 
-    expected_cagr = 1.21 ** (252 / 3) - 1
-    assert cagr(equity, periods=3) == pytest.approx(0.21)        
-    assert calmar_ratio(equity, periods=3) == pytest.approx(2.1)   
+    assert cagr(equity, periods=3) == pytest.approx(0.21)
+    assert calmar_ratio(equity, periods=3) == pytest.approx(2.1)
 
 
 def test_sharpe_and_sortino_by_hand():
@@ -61,8 +63,8 @@ def test_sharpe_and_sortino_by_hand():
     """
     r = pd.Series([0.02, -0.01, 0.03, -0.02])
 
-    assert sharpe_ratio(r) == pytest.approx(0.005 / math.sqrt(0.0017 / 3) * SQRT_252)
-    assert sortino_ratio(r) == pytest.approx(0.005 / math.sqrt(0.0005 / 4) * SQRT_252)
+    assert sharpe_ratio(r) == pytest.approx(0.005 / math.sqrt(0.0017 / 3) * SQRT_PPY)
+    assert sortino_ratio(r) == pytest.approx(0.005 / math.sqrt(0.0005 / 4) * SQRT_PPY)
 
 
 def test_trade_stats_profit_factor_by_hand():
@@ -92,9 +94,9 @@ def test_break_even_win_rate_with_costs_by_hand():
 
 
 def test_turnover_and_cost_hurdle_by_hand():
-    """Equity 1000 constante en 5 barras (N = 4, años = 4/252); 5 acciones 100 -> 110, borrow 0.5.
+    """Equity 1000 constante en 5 barras (N = 4, años = 4/PPY); 5 acciones 100 -> 110, borrow 0.5.
 
-    turnover = (500 + 550)/1000/(4/252);  hurdle = turnover·0.001 + 0.5/1000/(4/252)
+    turnover = (500 + 550)/1000/(4/PPY);  hurdle = turnover·0.001 + 0.5/1000/(4/PPY)
     """
     dates = _dates(5)
     equity = pd.Series(1000.0, index=dates)
@@ -102,10 +104,10 @@ def test_turnover_and_cost_hurdle_by_hand():
                        "borrow_fee": 0.5, "entry_date": dates[1], "exit_date": dates[3]}])
 
     stats = turnover_stats(equity, trades, cost_rate=0.001)
-    expected_turnover = 1050 / 1000 / (4 / 252)
+    expected_turnover = 1050 / 1000 / (4 / PPY)
     assert stats["turnover_annual"] == pytest.approx(expected_turnover)
-    assert stats["cost_hurdle_annual"] == pytest.approx(expected_turnover * 0.001 + 0.5 / 1000 / (4 / 252))
-    assert stats["trades_per_year"] == pytest.approx(1 / (4 / 252))
+    assert stats["cost_hurdle_annual"] == pytest.approx(expected_turnover * 0.001 + 0.5 / 1000 / (4 / PPY))
+    assert stats["trades_per_year"] == pytest.approx(1 / (4 / PPY))
 
 
 def test_exposure_by_hand():
@@ -132,10 +134,10 @@ def test_buy_and_hold_by_hand():
 def test_summarize_sub_period_rebases_and_filters_trades():
     """Sub-periodo barras 3-5 de equity [100, 120, 90, 100, 110, 99] -> [100, 110, 99].
 
-    Rebasado a 10 000: final = 9900; DD = 99/110 - 1 = -10%; CAGR = 0.99^(252/2) - 1.
+    Rebasado a 10 000: final = 9900; DD = 99/110 - 1 = -10%; CAGR = 0.99^(PPY/2) - 1.
     Trade A (entra barra 0, sale barra 2) es de otro periodo. Trade B (entra barra 1,
     sale barra 4) cruza el corte: cuenta en este periodo y solo su pata de salida
-    entra en el turnover: 2·105/media(100, 110, 99)/(2/252).
+    entra en el turnover: 2·105/media(100, 110, 99)/(2/PPY).
     """
     dates = _dates(6)
     equity_df = pd.DataFrame({"equity": [100.0, 120.0, 90.0, 100.0, 110.0, 99.0],
@@ -155,4 +157,4 @@ def test_summarize_sub_period_rebases_and_filters_trades():
     assert summary["n_trades"] == 1
     assert summary["avg_pnl"] == pytest.approx(8.0)
     assert summary["exposure"] == pytest.approx(2 / 3)
-    assert summary["turnover_annual"] == pytest.approx(2 * 105 / ((100 + 110 + 99) / 3) / (2 / 252))
+    assert summary["turnover_annual"] == pytest.approx(2 * 105 / ((100 + 110 + 99) / 3) / (2 / PPY))

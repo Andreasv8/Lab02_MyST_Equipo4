@@ -7,6 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest import BacktestConfig, backtest
+from src.strategy import COMMISSION_RATE, SLIPPAGE_RATE
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
@@ -90,13 +91,15 @@ def test_accounting_identities_with_lab_costs():
 
     1. En cada barra, equity = efectivo + unidades · Close.
     2. Sin posicion abierta al final, equity final = capital inicial + Σ pnl.
-    3. Costos cobrados = comision · nocional operado (cada trade son 2 operaciones).
+    3. Costos cobrados = (comision + slippage) · nocional operado (cada trade son 2 operaciones).
     4. El efectivo nunca es negativo (sin apalancamiento).
     """
     scenario = pd.read_csv(GOLDEN_DIR / "backtest_scenario.csv", index_col="Date", parse_dates=True)
     df = scenario[["Open", "High", "Low", "Close"]]
     config = BacktestConfig()
-    assert (config.initial_cash, config.cost_rate, config.borrow_fee_annual) == (1_000_000.0, 0.00125, 0.0)
+    assert (COMMISSION_RATE, SLIPPAGE_RATE) == (0.00125, 0.0005)
+    assert (config.initial_cash, config.cost_rate, config.borrow_fee_annual) == \
+        (1_000_000.0, COMMISSION_RATE + SLIPPAGE_RATE, 0.0)
 
     result = backtest(df, scenario["signal"], scenario["atr"], config)
     equity, trades = result.equity, result.trades

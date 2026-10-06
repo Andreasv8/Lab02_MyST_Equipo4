@@ -175,15 +175,18 @@ def test_max_holding_closes_on_tenth_bar(monkeypatch):
 
 
 def test_sizing_truncates_with_entry_cost():
-    """Con ATR chico frente al precio, el tope de apalancamiento 1 (con costo de entrada) recorta Q."""
+    """Con ATR chico frente al precio, el tope de apalancamiento 1 (con costo de entrada) recorta Q.
+
+    BTC es divisible: Q no se redondea, se recorta a V / (P_e · (1 + c)) exacto.
+    """
     capital = 10_000.0
     entry_price = 100.0
 
     shares, truncated = compute_sizing(capital, atr_value=0.1, entry_price=entry_price, rho=0.01)
 
     assert truncated
-    assert shares == int(capital // (entry_price * (1 + TOTAL_COST_RATE)))
-    assert shares * entry_price * (1 + TOTAL_COST_RATE) <= capital
+    assert shares == pytest.approx(capital / (entry_price * (1 + TOTAL_COST_RATE)))
+    assert shares * entry_price * (1 + TOTAL_COST_RATE) <= capital + 1e-9
 
 
 def test_borrow_fee_formula_by_calendar_days():

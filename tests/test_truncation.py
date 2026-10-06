@@ -4,7 +4,7 @@ Si el pipeline es causal, el valor en la barra t calculado con la serie
 completa es igual al calculado con df.iloc[:t+1] (solo datos hasta t).
 Los canarios demuestran que la misma comparacion detecta una fuga a proposito.
 
-Datos: NVDA solo hasta el fin de test (src/splits.py); validation no se usa.
+Datos: las primeras 5000 barras de 5 minutos de BTC de train; validation no se usa.
 """
 
 import sys
@@ -17,9 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lab_02.src.data import load_btc
 from src.backtest import BacktestConfig, backtest
-from src.splits import SPLITS
+from src.data import load_btc
 from src.strategy import compute_features
 
 DF = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")).iloc[:5000]
@@ -79,7 +78,7 @@ def leaky_features(df: pd.DataFrame, lag: int) -> pd.DataFrame:
 
 @pytest.mark.parametrize("t", T_BARS)
 def test_features_are_causal(t):
-    """ROC, CMF, ADX, ATR y la señal en t no cambian si se quitan las barras posteriores a t."""
+    """ROC, MACD, +DI/-DI, ADX, ATR y la señal en t no cambian si se quitan las barras posteriores a t."""
     _check_features(DF, t, compute_features)
 
 
