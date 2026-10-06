@@ -56,17 +56,6 @@ def rolling_volatility(close: pd.Series, window: int = WINDOW) -> pd.Series:
     return log_returns(close).rolling(window=window).std(ddof=1) * np.sqrt(PERIODS_PER_YEAR)
 
 
-def _r2_vs_time(y: np.ndarray) -> float:
-    """R^2 de la regresion y = a + b*x con x = 0..n-1; R^2 = corr(x, y)^2. NaN si var(y) = 0."""
-    x = np.arange(len(y), dtype=float)
-    x_c = x - x.mean()
-    y_c = y - y.mean()
-    ss_y = np.dot(y_c, y_c)
-    if ss_y == 0:
-        return np.nan
-    return np.dot(x_c, y_c) ** 2 / (np.dot(x_c, x_c) * ss_y)
-
-
 def rolling_trend_r2(close: pd.Series, window: int = WINDOW) -> pd.Series:
     """R^2 de la regresion lineal del log-precio contra el tiempo en la ventana.
 
@@ -77,18 +66,15 @@ def rolling_trend_r2(close: pd.Series, window: int = WINDOW) -> pd.Series:
     Cerca de 1 = el precio avanza en linea recta (tendencia limpia);
     cerca de 0 = se mueve de lado o con ruido. Se usa log-precio para que una
     tendencia de crecimiento porcentual constante sea lineal.
+
+    Se calcula con rolling().corr() (vectorizado): corr(x, y) no cambia si x se
+    desplaza, asi que x = posicion de la barra. y se centra en el primer
+    log-precio para reducir error numerico; es causal (solo usa la barra 0).
     """
-    return np.log(close).rolling(window=window).apply(_r2_vs_time, raw=True)
-
-
-def _lag1_corr(r: np.ndarray) -> float:
-    """Correlacion de Pearson entre r[:-1] y r[1:]. NaN si alguno tiene varianza 0."""
-    a, b = r[:-1], r[1:]
-    a_c, b_c = a - a.mean(), b - b.mean()
-    denom = np.sqrt(np.dot(a_c, a_c) * np.dot(b_c, b_c))
-    if denom == 0:
-        return np.nan
-    return np.dot(a_c, b_c) / denom
+    y = np.log(close)
+    y = y - y.iloc[0]
+    x = pd.Series(np.arange(len(close), dtype=float), index=close.index)
+    return y.rolling(window=window).corr(x) ** 2
 
 
 def rolling_autocorr_1(close: pd.Series, window: int = WINDOW) -> pd.Series:
@@ -100,8 +86,11 @@ def rolling_autocorr_1(close: pd.Series, window: int = WINDOW) -> pd.Series:
     Por que: mide si los movimientos se revierten o persisten.
     Negativa = reversion a la media (a un dia de subida le sigue uno de bajada);
     positiva = persistencia/momentum de corto plazo.
+
+    Vectorizado: corr de (r_k, r_{k-1}) en ventanas de N-1 pares.
     """
-    return log_returns(close).rolling(window=window).apply(_lag1_corr, raw=True)
+    r = log_returns(close)
+    return r.rolling(window=window - 1).corr(r.shift(1))
 
 
 def regime_features(df: pd.DataFrame, window: int = WINDOW) -> pd.DataFrame:
@@ -137,7 +126,7 @@ def hourly(features: pd.DataFrame) -> pd.DataFrame:
     return features[features.index.minute == 0]
 
 
-def _to_bars(labels: pd.Series, index: pd.Index) -> pd.Series:
+def to_bars(labels: pd.Series, index: pd.Index) -> pd.Series:
     """Lleva etiquetas horarias a todas las barras: cada barra toma la de la ultima hh:00 <= t.
 
     Es causal: la barra t solo ve la etiqueta de una hora ya cerrada en t.
@@ -570,4 +559,4 @@ def regime_labels(df: pd.DataFrame, models: RegimeModels) -> pd.DataFrame:
         "hmm": classify_hmm_filtered(features, models.scaler, models.hmm, models.hmm_names),
         "hmm_viterbi": classify_hmm_viterbi(features, models.scaler, models.hmm, models.hmm_names),
     }, index=features.index)
-    return labels.apply(_to_bars, index=df.index)
+    return labels.apply(to_bars, index=df.index)

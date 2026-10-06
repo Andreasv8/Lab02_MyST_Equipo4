@@ -3,6 +3,9 @@
 Funciones puras: reciben etiquetas (salida de regimes.regime_labels),
 features y modelos ya ajustados en train, y regresan tablas. No leen
 archivos ni ajustan nada. Todas ignoran los NaN de warm-up.
+
+Los clasificadores cambian de etiqueta solo en las barras hh:00, asi que las
+comparaciones de persistencia y separacion se hacen en pasos horarios.
 """
 
 from typing import Iterable, Optional
@@ -20,14 +23,16 @@ from src.regimes import (
     RegimeScaler,
     apply_scaler,
     hmm_expected_durations,
+    hmm_forward,
+    hourly,
     name_states,
-    regime_labels,
+    regime_features,
 )
 from src.splits import SPLITS
 
 METHODS = ["rules", "kmeans", "hmm"]
 DEFAULT_PERIODS = {"train": SPLITS["train"], "test": SPLITS["test"]}
-BARS_PER_MONTH = 288*30
+HOURS_PER_MONTH = 24 * 30
 
 
 def _clean(labels: Iterable) -> pd.Series:
@@ -90,23 +95,23 @@ def regime_silhouette(x_scaled: pd.DataFrame, labels: pd.Series) -> float:
 
 def _period_rows(labels_df: pd.DataFrame, features: pd.DataFrame, method: str,
                  start: str, end: str) -> tuple[pd.Series, pd.DataFrame]:
-    """Etiquetas de un metodo y features en el periodo, solo barras con ambas disponibles."""
-    labels = labels_df.loc[start:end, method]
-    feats = features.loc[start:end, REGIME_COLUMNS]
+    """Etiquetas de un metodo y features en el periodo, en barras hh:00 con ambas disponibles."""
+    labels = hourly(labels_df).loc[start:end, method]
+    feats = hourly(features).loc[start:end, REGIME_COLUMNS]
     valid = labels.notna() & feats.notna().all(axis=1)
     return labels[valid], feats[valid]
 
 
 def comparison_table(labels_df: pd.DataFrame, features: pd.DataFrame, scaler: RegimeScaler,
                      periods: dict = DEFAULT_PERIODS) -> pd.DataFrame:
-    """Tabla comparativa de los metodos filtrados por periodo.
+    """Tabla comparativa de los metodos filtrados por periodo, en pasos horarios (hh:00).
 
     Columnas, por (metodo, periodo):
     - silhouette: separacion de los regimenes en features ESCALADAS con el
       scaler de train (NaN si hay < 2 regimenes).
     - mean_duration_<regimen> y mean_duration_all: promedio de las rachas en
-      barras (las rachas se cortan en el borde del periodo).
-    - transitions_per_month: cambios de etiqueta / (barras / 21).
+      horas (las rachas se cortan en el borde del periodo).
+    - transitions_per_month: cambios de etiqueta / (horas / HOURS_PER_MONTH).
     - share_<regimen>: % de barras en cada regimen.
 
     Parametros
@@ -134,7 +139,7 @@ def comparison_table(labels_df: pd.DataFrame, features: pd.DataFrame, scaler: Re
             for name in REGIME_NAMES:
                 row[f"mean_duration_{name}"] = np.mean(runs[name]) if name in runs else np.nan
             row["mean_duration_all"] = np.mean([n for r in runs.values() for n in r])
-            row["transitions_per_month"] = count_transitions(labels) / (len(labels) / BARS_PER_MONTH)
+            row["transitions_per_month"] = count_transitions(labels) / (len(labels) / HOURS_PER_MONTH)
             for name, share in regime_shares(labels, REGIME_NAMES).items():
                 row[f"share_{name}"] = share
             rows[(method, period)] = row
@@ -146,7 +151,8 @@ def hmm_diagnostics(labels_df: pd.DataFrame, model: GaussianHMM, names: dict[int
     """Diagnosticos exclusivos del HMM.
 
     1. Por regimen: duracion esperada del modelo, 1 / (1 - a_jj), contra la
-       duracion media observada de las rachas filtradas en cada periodo.
+       duracion media observada de las rachas filtradas en cada periodo
+       (ambas en horas: se usan las barras hh:00).
        Si la observada es mucho menor, el forward cambia de estado mas
        seguido de lo que la matriz A sugiere.
     2. Por periodo: % de barras donde la etiqueta filtrada coincide con
@@ -160,7 +166,7 @@ def hmm_diagnostics(labels_df: pd.DataFrame, model: GaussianHMM, names: dict[int
     durations = pd.DataFrame({"expected": hmm_expected_durations(model, names)})
     agreement = {}
     for period, (start, end) in periods.items():
-        sub = labels_df.loc[start:end, ["hmm", "hmm_viterbi"]].dropna()
+        sub = hourly(labels_df).loc[start:end, ["hmm", "hmm_viterbi"]].dropna()
         runs = regime_runs(sub["hmm"])
         durations[f"observed_{period}"] = pd.Series({n: np.mean(r) for n, r in runs.items()})
         agreement[period] = (sub["hmm"] == sub["hmm_viterbi"]).mean() * 100
@@ -195,12 +201,12 @@ def regime_centroids(labels_df: pd.DataFrame, features: pd.DataFrame,
 
 def regime_return_profile(df: pd.DataFrame, labels_df: pd.DataFrame,
                           periods: dict = DEFAULT_PERIODS) -> pd.DataFrame:
-    """Rendimiento y volatilidad anualizados de NVDA por regimen (descriptivo).
+    """Rendimiento y volatilidad anualizados de BTC por regimen (descriptivo).
 
-    A la etiqueta de t se le asocia el rendimiento simple del dia siguiente,
+    A la etiqueta de t se le asocia el rendimiento simple de la barra siguiente,
     R_{t+1} = Close_{t+1} / Close_t - 1: lo que se gana DESPUES de conocer el
     regimen, y no el rendimiento que ya entro en las features de t.
-    ann_return = media(R) * 252; ann_volatility = std(R) * sqrt(252).
+    ann_return = media(R) * PERIODS_PER_YEAR; ann_volatility = std(R) * sqrt(PERIODS_PER_YEAR).
     La ultima barra no tiene t+1 y se excluye. No se usa para ajustar nada:
     solo muestra si los regimenes son economicamente distintos.
 
@@ -219,19 +225,24 @@ def regime_return_profile(df: pd.DataFrame, labels_df: pd.DataFrame,
                 r = data.loc[data["label"] == name, "ret"]
                 rows[(method, period, name)] = {
                     "n_bars": len(r),
-                    "ann_return": r.mean() * TRADING_DAYS,
-                    "ann_volatility": r.std() * np.sqrt(TRADING_DAYS),
+                    "ann_return": r.mean() * PERIODS_PER_YEAR,
+                    "ann_volatility": r.std() * np.sqrt(PERIODS_PER_YEAR),
                 }
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis(["method", "period", "regime"])
 
 
 def viterbi_lookahead_check(df: pd.DataFrame, models: RegimeModels, step: int = 5) -> pd.DataFrame:
-    """Compara la etiqueta en t con la serie completa vs con df.iloc[:t+1], filtrado y Viterbi.
+    """Compara la etiqueta en la hora k con la serie completa vs truncada en k, filtrado y Viterbi.
 
-    Si un metodo es causal, su etiqueta en t no cambia al quitar las barras
-    posteriores a t. El HMM filtrado (forward) no debe cambiar nunca; Viterbi
+    Si un metodo es causal, su etiqueta en k no cambia al quitar las horas
+    posteriores a k. El HMM filtrado (forward) no debe cambiar nunca; Viterbi
     si puede cambiar porque elige la secuencia completa con backtracking
-    desde la ultima barra (look-ahead). Es el canario del notebook.
+    desde la ultima hora (look-ahead). Es el canario del notebook.
+
+    Las features se calculan una vez (su causalidad se prueba en
+    tests/test_regimes.py) y se trunca la secuencia horaria que ve el HMM.
+    Filtrado truncado = ultima fila de predict_proba(x[:k+1]), que es igual
+    al forward en k (tests/test_regimes.py).
 
     Parametros
     ----------
@@ -240,20 +251,23 @@ def viterbi_lookahead_check(df: pd.DataFrame, models: RegimeModels, step: int = 
     models : RegimeModels
         Modelos ya ajustados en train (no se reajustan).
     step : int
-        Se revisa una t cada step barras, desde la primera con features.
+        Se revisa una hora cada step horas, desde la primera con features.
 
     Regresa
     -------
     pd.DataFrame
-        Indice = fecha de t; columnas hmm_same y hmm_viterbi_same (bool).
+        Indice = fecha de la hora k; columnas hmm_same y hmm_viterbi_same (bool).
     """
-    full = regime_labels(df, models)
-    start = df.index.get_loc(full["hmm"].first_valid_index())
+    x = apply_scaler(hourly(regime_features(df)).dropna(), models.scaler)
+    x_np = x.to_numpy()
+    full_filtered = hmm_forward(models.hmm, x_np).argmax(axis=1)
+    full_viterbi = models.hmm.predict(x_np)
     rows = {}
-    for t in range(start, len(df), step):
-        truncated = regime_labels(df.iloc[:t + 1], models).iloc[-1]
-        rows[df.index[t]] = {col + "_same": truncated[col] == full[col].iloc[t]
-                             for col in ["hmm", "hmm_viterbi"]}
+    for k in range(0, len(x), step):
+        rows[x.index[k]] = {
+            "hmm_same": models.hmm.predict_proba(x_np[:k + 1])[-1].argmax() == full_filtered[k],
+            "hmm_viterbi_same": models.hmm.predict(x_np[:k + 1])[-1] == full_viterbi[k],
+        }
     return pd.DataFrame.from_dict(rows, orient="index")
 
 

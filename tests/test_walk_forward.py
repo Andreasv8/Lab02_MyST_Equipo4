@@ -1,6 +1,6 @@
 """Pruebas de src/walk_forward.py (Act 07 v2, ACT07_ROBUST.md).
 
-Datos: NVDA hasta el fin de test (src/splits.py); validation no se usa.
+Datos: BTC de 5 minutos hasta el fin de test (src/splits.py); validation no se usa.
 No se corren los 200 trials: la meseta y la regla a priori se prueban con
 estudios sinteticos.
 """
@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest import backtest
+from src.data import load_btc
 from src.optimization import THETA0, theta_config, theta_signal
 from src.splits import SPLITS
 from src.walk_forward import (
@@ -34,8 +35,7 @@ from src.walk_forward import (
 )
 
 TEST_END = SPLITS["test"][1]
-DF = pd.read_csv(Path(__file__).resolve().parents[1] / "data" / "NVDA_daily.csv",
-                 index_col="Date", parse_dates=True).loc[:TEST_END]
+DF = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")).loc[:TEST_END]
 MODELS = [fit_block_models(DF, block.fit_end) for block in BLOCKS]
 
 # θ con salida distinta de θ0 para que el backtest no sea el de siempre.
@@ -45,12 +45,12 @@ BLOCK_IDS = range(len(BLOCKS))
 
 
 def _corrupt_after(df: pd.DataFrame, end: str) -> pd.DataFrame:
-    """Copia de df con los precios y volumen posteriores a end multiplicados por ruido."""
+    """Copia de df con los precios y volumen posteriores al dia end multiplicados por ruido."""
     rng = np.random.default_rng(42)
     cols = ["Open", "High", "Low", "Close", "Volume"]
     out = df.copy()
     out[cols] = out[cols].astype(float)
-    after = out.index > pd.Timestamp(end)
+    after = out.index.normalize() > pd.Timestamp(end)
     noise = rng.uniform(0.5, 1.5, size=(after.sum(), 1))
     out.loc[after, cols] = out.loc[after, cols].to_numpy() * noise
     return out
@@ -100,7 +100,7 @@ def test_eval_window_is_inside_block():
     for block, models in zip(BLOCKS, MODELS):
         data = prepare_block(DF, block, models)
         assert data.df_eval.index[0] >= pd.Timestamp(block.eval_start)
-        assert data.df_eval.index[-1] <= pd.Timestamp(block.eval_end)
+        assert data.df_eval.index[-1].normalize() <= pd.Timestamp(block.eval_end)
         assert data.labels.notna().all()
 
 

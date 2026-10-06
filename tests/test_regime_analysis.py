@@ -89,13 +89,12 @@ def test_method_scorecard_hand_case():
 
 
 def test_viterbi_lookahead_check_filtered_never_changes():
-    """Con pocas t: la etiqueta filtrada del HMM no cambia al truncar."""
+    """Con pocas horas: la etiqueta filtrada del HMM no cambia al truncar."""
+    from src.data import load_btc
     from src.regime_analysis import viterbi_lookahead_check
     from src.regimes import fit_regime_models
-    from src.splits import SPLITS
 
-    df = pd.read_csv(Path(__file__).resolve().parents[1] / "data" / "NVDA_daily.csv",
-                     index_col="Date", parse_dates=True).loc[:SPLITS["test"][1]]
+    df = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")).iloc[:30_000]
     check = viterbi_lookahead_check(df, fit_regime_models(df), step=150)
     assert len(check) >= 5
     assert check["hmm_same"].all()

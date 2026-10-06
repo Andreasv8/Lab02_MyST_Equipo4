@@ -7,7 +7,8 @@ train) encadenados.
 
 Anti look-ahead: en cada bloque el scaler, el umbral p90 y el HMM se ajustan
 UNA vez con datos <= fin del tramo de ajuste y se reutilizan en todos los
-trials. Las etiquetas del tramo de evaluacion son las filtradas (causales).
+trials. Las etiquetas del tramo de evaluacion son las filtradas (causales),
+calculadas en las barras hh:00 y mantenidas el resto de la hora.
 Test y validation no se usan aqui.
 """
 
@@ -30,7 +31,9 @@ from src.regimes import (
     fit_hmm,
     fit_rule_thresholds,
     fit_scaler,
+    hourly,
     regime_features,
+    to_bars,
 )
 from src.splits import SPLITS
 
@@ -53,11 +56,13 @@ class Block:
     eval_end: str
 
 
-# ACT07_ROBUST.md, seccion 4.
+# Ventana creciente dentro de train de BTC (2022-06-01 .. 2023-05-14): tres
+# tramos de evaluacion de 2 meses; el ultimo termina en el fin de train.
+# Las fechas son dias completos (df.loc[:"2023-01-14"] incluye todo ese dia).
 BLOCKS = [
-    Block("2023-03-14", "2023-03-15", "2023-09-14"),
-    Block("2023-09-14", "2023-09-15", "2024-03-14"),
-    Block("2024-03-14", "2024-03-15", "2024-09-14"),
+    Block("2022-11-14", "2022-11-15", "2023-01-14"),
+    Block("2023-01-14", "2023-01-15", "2023-03-14"),
+    Block("2023-03-14", "2023-03-15", "2023-05-14"),
 ]
 
 
@@ -80,7 +85,8 @@ def fit_block_models(df: pd.DataFrame, fit_end: str) -> BlockModels:
     """Ajusta scaler, umbral p90 y HMM (cascada de 10 semillas) con datos FIT_START..fit_end.
 
     Las features se calculan sobre df.loc[:fit_end], asi que nada posterior a
-    fit_end entra al ajuste aunque df sea mas largo.
+    fit_end entra al ajuste aunque df sea mas largo. Se ajusta en las barras
+    hh:00 (hourly), igual que fit_regime_models.
 
     Parametros
     ----------
@@ -93,7 +99,7 @@ def fit_block_models(df: pd.DataFrame, fit_end: str) -> BlockModels:
     -------
     BlockModels
     """
-    features = regime_features(df.loc[:fit_end]).loc[FIT_START:fit_end]
+    features = hourly(regime_features(df.loc[:fit_end]).loc[FIT_START:fit_end])
     scaler = fit_scaler(features)
     hmm, names, choice = fit_hmm(features, scaler)
     return BlockModels(scaler, fit_rule_thresholds(features), hmm, names, choice)
@@ -126,8 +132,9 @@ def prepare_block(df: pd.DataFrame, block: Block, models: BlockModels) -> BlockD
     """
     df_trunc = df.loc[:block.eval_end]
     signal, atr = theta_signal(df_trunc, THETA0)
-    labels = classify_hmm_filtered(regime_features(df_trunc), models.scaler,
-                                   models.hmm, models.hmm_names)
+    hourly_labels = classify_hmm_filtered(hourly(regime_features(df_trunc)), models.scaler,
+                                          models.hmm, models.hmm_names)
+    labels = to_bars(hourly_labels, df_trunc.index)
     window = slice(block.eval_start, block.eval_end)
     return BlockData(df_trunc.loc[window], signal.loc[window], atr.loc[window], labels.loc[window])
 
