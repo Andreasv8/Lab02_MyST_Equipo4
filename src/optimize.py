@@ -13,6 +13,7 @@ con un backtest continuo.
 
 import math
 import time
+from dataclasses import replace
 from typing import Optional
 
 import joblib
@@ -20,9 +21,9 @@ import numpy as np
 import optuna
 import pandas as pd
 
-from src.backtest import BacktestResult, backtest, config_from_params
-from src.metrics import calmar_ratio
-from src.regimes import REGIME_NAMES, rule_regimes
+from src.backtest import COMMISSION_RATE, BacktestResult, backtest, config_from_params
+from src.metrics import break_even_cost, calmar_ratio
+from src.regimes import HOURS_PER_MONTH, REGIME_NAMES, hourly, rule_regimes
 from src.signals import THETA0, compute_strategy
 
 SEED = 42
@@ -47,6 +48,13 @@ SEARCH_PARAMS = ["ema_fast", "slow_ratio", "roc_window", "bb_window", "bb_thresh
                  "adx_threshold", "sl_mult", "rr", "max_holding", "rho"]
 INT_PARAMS = ["ema_fast", "roc_window", "bb_window", "max_holding"]
 FIXED_PARAMS = {"bb_std": 2, "adx_window": 14, "atr_window": 14}
+# Limites del espacio de busqueda (los mismos de suggest_params; un test lo revisa).
+SEARCH_BOUNDS = {
+    "ema_fast": (5, 30), "slow_ratio": (2.0, 6.0), "roc_window": (6, 42), "bb_window": (10, 40),
+    "bb_threshold": (0.55, 0.90), "adx_threshold": (15.0, 35.0), "sl_mult": (1.0, 4.0),
+    "rr": (1.0, 8.0), "max_holding": (288, 4032), "rho": (0.005, 0.02),
+}
+REAL_COST_BPS = 12.5             # comision real por lado: 0.125% = 12.5 pb
 
 
 # ---------------------------------------------------------------------------
@@ -327,13 +335,16 @@ def build_oos_inputs(df: pd.DataFrame, results: list[dict], use_regimes: bool = 
     return inputs
 
 
-def run_oos(df: pd.DataFrame, inputs: pd.DataFrame, capital: float = CAPITAL) -> BacktestResult:
+def run_oos(df: pd.DataFrame, inputs: pd.DataFrame, capital: float = CAPITAL,
+            commission_rate: float = COMMISSION_RATE) -> BacktestResult:
     """Un solo backtest continuo sobre todas las semanas de test, con parametros por barra.
 
     Las posiciones pueden cruzar de una semana a otra y conservan los
-    parametros con los que entraron (R1).
+    parametros con los que entraron (R1). commission_rate es la comision por
+    lado (se cambia solo en la curva de costos).
     """
-    config = config_from_params(THETA0, capital)   # los escalares no se usan: todo va por barra
+    # Los escalares de θ no se usan: sl, tp, holding y rho van por barra.
+    config = replace(config_from_params(THETA0, capital), commission_rate=commission_rate)
     return backtest(df.loc[inputs.index], inputs["signal"], inputs["atr"], config,
                     sl_mult=inputs["sl_mult"], tp_mult=inputs["tp_mult"],
                     max_holding=inputs["max_holding"], force_exit=inputs["force_exit"],
@@ -455,3 +466,131 @@ def degradation_table(results: list[dict], oos: dict) -> tuple[pd.DataFrame, pd.
         summary.append({"curve": name, "comparison": "weekly_return", "train": train_weekly,
                         "oos": oos_weekly, "share_survives": oos_weekly / train_weekly})
     return table, pd.DataFrame(summary)
+
+
+# ---------------------------------------------------------------------------
+# 5. Robustez (docs/SPEC.md, seccion 14)
+# ---------------------------------------------------------------------------
+
+def shift_param(name: str, base: float, factor: float) -> tuple[float, bool]:
+    """Mueve un parametro por un factor (0.8 o 1.2) con las reglas de SPEC 14.1.
+
+    Los enteros se redondean y se mueven al menos 1 unidad. Todo valor se
+    recorta a los limites del espacio de busqueda.
+    Regresa (valor nuevo, True si quedo igual al base: "en el limite").
+    """
+    low, high = SEARCH_BOUNDS[name]
+    value = base * factor
+    if name in INT_PARAMS:
+        value = _round_half_up(value)
+        if value == base:
+            value = base + (1 if factor > 1 else -1)
+    value = min(max(value, low), high)
+    return value, value == base
+
+
+def train_run(df: pd.DataFrame, theta: dict, single_vote: Optional[str] = None) -> tuple[float, int]:
+    """Calmar y numero de trades de θ sobre todo df (un solo backtest)."""
+    features = compute_strategy(df, theta, single_vote)
+    result = backtest(df, features["signal"], features["atr"], config_from_params(theta, CAPITAL))
+    return calmar_ratio(result.equity["equity"]), len(result.trades)
+
+
+def sensitivity_table(df: pd.DataFrame, theta: dict) -> pd.DataFrame:
+    """Sensibilidad ±20% de cada parametro de θ, uno a la vez (SPEC 14.1).
+
+    Sirve para ver si θ esta en una meseta (el Calmar cambia poco) o en un
+    pico (cambia mucho: señal de sobreajuste). ema_slow se recalcula con cada
+    cambio de ema_fast o slow_ratio.
+    Regresa una fila por parametro con los valores -20%, base y +20%, el
+    Calmar en cada uno y si el valor movido quedo "en el limite".
+    """
+    base_calmar, _ = train_run(df, theta)
+    rows = []
+    for name in SEARCH_PARAMS:
+        row = {"param": name, "value_base": theta[name], "calmar_base": base_calmar}
+        for label, factor in [("minus_20", 0.8), ("plus_20", 1.2)]:
+            value, at_limit = shift_param(name, theta[name], factor)
+            values = {param: theta[param] for param in SEARCH_PARAMS}
+            values[name] = value
+            calmar, _ = train_run(df, theta_from_values(values))
+            row.update({f"value_{label}": value, f"calmar_{label}": calmar, f"at_limit_{label}": at_limit})
+        rows.append(row)
+    columns = ["param", "value_minus_20", "value_base", "value_plus_20", "calmar_minus_20",
+               "calmar_base", "calmar_plus_20", "at_limit_minus_20", "at_limit_plus_20"]
+    return pd.DataFrame(rows)[columns]
+
+
+def single_vote_table(df: pd.DataFrame, theta: dict) -> pd.DataFrame:
+    """Un solo indicador contra la regla 2 de 3, con θ sobre todo df (SPEC 14.3)."""
+    rows = {}
+    for label, vote in [("EMA sola", "ema"), ("ROC sola", "roc"), ("BB sola", "bb"), ("2 de 3", None)]:
+        calmar, n_trades = train_run(df, theta, vote)
+        rows[label] = {"n_trades": n_trades, "calmar": calmar}
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("rule")
+
+
+def oos_cost_curve(df: pd.DataFrame, inputs: pd.DataFrame,
+                   bps_grid=np.arange(0, 50.01, 2.5)) -> pd.DataFrame:
+    """Retorno neto y Calmar de la curva OOS para cada comision por lado (SPEC 14.2).
+
+    Usa EXACTAMENTE las mismas entradas por barra de la curva OOS (señal, ATR,
+    sl, tp, holding, rho y force_exit); solo cambia la comision. No se
+    vuelve a optimizar ni se recalcula la señal.
+    Regresa una tabla indexada por la comision por lado en pb.
+    """
+    rows = {}
+    for bps in bps_grid:
+        equity = run_oos(df, inputs, commission_rate=bps / 10_000).equity["equity"]
+        rows[float(bps)] = {"total_return": equity.iloc[-1] / equity.iloc[0] - 1,
+                            "calmar": calmar_ratio(equity)}
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("commission_bps")
+
+
+def cost_summary(curve: pd.DataFrame, real_bps: float = REAL_COST_BPS) -> pd.Series:
+    """Break-even (comision donde el retorno neto cruza 0) y margen contra la comision real.
+
+    Si la estrategia ya pierde con comision 0, no hay break-even: se marca
+    loses_without_costs y gross_return_0bps es el resultado bruto.
+    """
+    gross = curve["total_return"].iloc[0]
+    break_even = break_even_cost(curve.index, curve["total_return"])
+    return pd.Series({
+        "gross_return_0bps": gross,
+        "return_at_real_cost": curve.loc[real_bps, "total_return"],
+        "break_even_bps": break_even,
+        "margin_bps": break_even - real_bps,
+        "loses_without_costs": bool(gross <= 0),
+    })
+
+
+def entry_regimes(trades: pd.DataFrame, inputs: pd.DataFrame) -> pd.Series:
+    """Regimen de la barra de entrada de cada trade de una curva OOS."""
+    return pd.Series(inputs["regime"].to_numpy()[trades["entry_bar"].to_numpy()], index=trades.index)
+
+
+def transitions_table(inputs: pd.DataFrame, trades: pd.DataFrame, results: list[dict]) -> pd.DataFrame:
+    """Transiciones de regimen en la curva OOS y uso de R3 y R5, por regimen.
+
+    - transitions_in_per_month: veces por mes que se entra al regimen (pasos de 1 hora).
+    - regime_exits: trades cerrados por R3 (motivo regime_exit), por regimen de entrada.
+    - r5_windows: ventanas donde ese regimen uso los parametros globales (R5).
+    La fila "total" lleva todas las transiciones por mes.
+    """
+    labels = hourly(inputs["regime"]).dropna()
+    months = len(labels) / HOURS_PER_MONTH
+    changed = labels != labels.shift()
+    changed.iloc[0] = False
+    exits = trades[trades["exit_reason"] == "regime_exit"]
+    exit_regimes = entry_regimes(exits, inputs)
+    table = window_table(results)
+    rows = {}
+    for regime in REGIME_NAMES:
+        rows[regime] = {
+            "transitions_in_per_month": (changed & (labels == regime)).sum() / months,
+            "regime_exits": int((exit_regimes == regime).sum()),
+            "r5_windows": int(table.loc[table["study"] == regime, "used_r5"].sum()),
+        }
+    rows["total"] = {"transitions_in_per_month": changed.sum() / months,
+                     "regime_exits": len(exits), "r5_windows": sum(r["r5_windows"] for r in rows.values())}
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("regime")

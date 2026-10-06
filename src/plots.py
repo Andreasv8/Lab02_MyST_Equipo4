@@ -45,52 +45,6 @@ def _split_line(ax: plt.Axes, split_date: pd.Timestamp, label: str = "inicio de 
                 xytext=(4, offset), textcoords="offset points", fontsize=9, color="#3d3c39")
 
 
-def plot_cost_sensitivity(ax: plt.Axes, sensitivity: pd.DataFrame, assumed_bps: float,
-                          break_even: Optional[dict] = None) -> plt.Axes:
-    """Sharpe vs costo de ida y vuelta, una linea por periodo (train, test).
-
-    Parametros
-    ----------
-    ax : plt.Axes
-        Ejes donde dibujar.
-    sensitivity : pd.DataFrame
-        Salida de analysis.cost_sensitivity (indice bps, columnas sharpe_train
-        y sharpe_test).
-    assumed_bps : float
-        Costo de ida y vuelta asumido en el SPEC (linea vertical).
-    break_even : dict, opcional
-        {periodo: bps de break-even}; se marca con una X en Sharpe = 0. Si es
-        NaN, la leyenda indica que no cruza en el rango.
-
-    Regresa
-    -------
-    plt.Axes
-    """
-    break_even = break_even or {}
-    styles = {"train": "--", "test": "-"}
-    bps = sensitivity.index
-
-    for period, linestyle in styles.items():
-        be = break_even.get(period, np.nan)
-        be_text = f"break-even {be:.1f} bps" if np.isfinite(be) else "no cruza 0 en el rango"
-        ax.plot(bps, sensitivity[f"sharpe_{period}"], color=STRATEGY_COLOR, linestyle=linestyle,
-                linewidth=2, marker="o", markersize=5, label=f"{period.capitalize()} ({be_text})")
-        if np.isfinite(be):
-            ax.plot([be], [0], marker="X", markersize=11, color=STRATEGY_COLOR,
-                    markeredgecolor="white", markeredgewidth=1.5, linestyle="none")
-
-    ax.axhline(0, color="#3d3c39", linewidth=0.8)
-    ax.axvline(assumed_bps, color=REFERENCE_COLOR, linestyle=":", linewidth=1.5)
-    ax.annotate(f"costo asumido {assumed_bps:g} bps", xy=(assumed_bps, 1), xycoords=("data", "axes fraction"),
-                xytext=(4, -12), textcoords="offset points", fontsize=9, color="#3d3c39")
-    ax.set_title("Sensibilidad del Sharpe al costo de transacción")
-    ax.set_xlabel("Costo de ida y vuelta (bps)")
-    ax.set_ylabel("Sharpe anualizado (adimensional)")
-    ax.legend(loc="center left", frameon=False)
-    _style(ax)
-    return ax
-
-
 def plot_elbow(ax: plt.Axes, elbow: pd.Series, chosen_k: int = 3) -> plt.Axes:
     """Curva del codo de K-means: inercia en train contra k, marcando el k elegido.
 
@@ -130,41 +84,34 @@ def _regime_line(ax: plt.Axes, close: pd.Series, labels: pd.Series) -> None:
     ax.xaxis_date()
 
 
-def plot_regime_timeline(close: pd.Series, labels_df: pd.DataFrame,
-                         split_date: pd.Timestamp) -> plt.Figure:
-    """Precio de cierre coloreado por regimen: un panel por metodo filtrado + Viterbi.
+def _regime_handles(with_warmup: bool = False) -> list:
+    """Entradas de leyenda con el color de cada regimen."""
+    handles = [Line2D([], [], color=c, linewidth=6, label=n) for n, c in REGIME_COLORS.items()]
+    if with_warmup:
+        handles.append(Line2D([], [], color=WARMUP_COLOR, linewidth=6, label="sin regimen (calentamiento)"))
+    return handles
 
-    Rejilla 2x2 con eje x compartido: reglas, K-means, HMM filtrado y HMM
-    Viterbi (este ultimo usa el futuro; se muestra solo para comparar).
 
-    Parametros
-    ----------
-    close : pd.Series
-        Cierre por barra (USD).
-    labels_df : pd.DataFrame
-        Salida de regime_labels (columnas rules, kmeans, hmm, hmm_viterbi).
-    split_date : pd.Timestamp
-        Primer dia de test (linea vertical).
+def plot_regime_timeline(close: pd.Series, labels_df: pd.DataFrame, split_date: pd.Timestamp) -> plt.Figure:
+    """Precio de cierre coloreado por regimen: reglas arriba (el metodo elegido), K-means y HMM abajo.
 
-    Regresa
-    -------
-    plt.Figure
+    Recibe el cierre por hora, las etiquetas por hora (columnas rules, kmeans,
+    hmm) y la fecha donde empieza el periodo fuera de muestra (linea vertical).
+    Regresa la figura.
     """
-    fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True, sharey=True)
-    for ax, method in zip(axes.flat, REGIME_PANEL_TITLES):
+    titles = {"rules": "Reglas (metodo elegido)", "kmeans": "K-means (solo comparacion)",
+              "hmm": "HMM filtrado (solo comparacion)"}
+    fig, axes = plt.subplots(3, 1, figsize=(13, 10), sharex=True, gridspec_kw={"height_ratios": [2, 1, 1]})
+    for ax, method in zip(axes, titles):
         _regime_line(ax, close, labels_df[method])
-        _split_line(ax, split_date)
-        ax.set_title(REGIME_PANEL_TITLES[method])
-        _style(ax)
-    for ax in axes[:, 0]:
+        _split_line(ax, split_date, label="inicio fuera de muestra")
+        ax.set_title(titles[method])
         ax.set_ylabel("Cierre BTCUSDT (USDT)")
-    for ax in axes[1, :]:
-        ax.set_xlabel("Fecha")
-    handles = [Line2D([], [], color=c, linewidth=2.5, label=n) for n, c in REGIME_COLORS.items()]
-    handles.append(Line2D([], [], color=WARMUP_COLOR, linewidth=2.5, label="warm-up (sin features)"))
-    fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False)
-    fig.suptitle("Regimenes de BTCUSDT por metodo (train + test)")
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
+        _style(ax)
+    axes[-1].set_xlabel("Fecha")
+    axes[0].legend(handles=_regime_handles(with_warmup=True), loc="upper left", frameon=False)
+    fig.suptitle("Regimenes de BTCUSDT por metodo (archivo de train)")
+    fig.tight_layout()
     return fig
 
 
@@ -202,9 +149,12 @@ def plot_feature_distributions(features: pd.DataFrame, labels_df: pd.DataFrame,
                 patch.set_edgecolor(REGIME_COLORS[regime])
             ax.set_xticks(range(1, len(regimes) + 1), regimes)
             ax.set_title(f"{REGIME_PANEL_TITLES[method]} - {col}", fontsize=10)
+            ax.set_xlabel("Régimen")
             ax.set_ylabel(units.get(col, col))
             _style(ax)
-    fig.tight_layout()
+    fig.legend(handles=_regime_handles(), loc="lower center", ncol=3, frameon=False)
+    fig.suptitle("Distribucion de las variables de regimen por regimen y metodo")
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     return fig
 
 
@@ -313,5 +263,105 @@ def plot_returns_table(monthly: pd.Series, quarterly: pd.Series, annual: pd.Seri
     _bar_returns(ax_q, quarterly, quarter_labels, "Retornos trimestrales")
     ax_y = fig.add_subplot(2, 2, 4)
     _bar_returns(ax_y, annual, [str(d.year) for d in annual.index], "Retornos anuales")
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Robustez y salidas de regimen
+# ---------------------------------------------------------------------------
+
+def plot_sensitivity(table: pd.DataFrame) -> plt.Figure:
+    """Calmar con cada parametro en -20%, base y +20% (barras agrupadas).
+
+    Recibe la salida de optimize.sensitivity_table. Las barras que quedaron
+    "en el limite" se marcan con un asterisco.
+    """
+    fig, ax = plt.subplots(figsize=(12, 5))
+    x = np.arange(len(table))
+    width = 0.27
+    bars = [("calmar_minus_20", "-20%", "#e8a33d", "at_limit_minus_20"),
+            ("calmar_base", "base (θ_final)", STRATEGY_COLOR, None),
+            ("calmar_plus_20", "+20%", "#2e8b57", "at_limit_plus_20")]
+    for k, (col, label, color, limit_col) in enumerate(bars):
+        positions = x + (k - 1) * width
+        ax.bar(positions, table[col], width, color=color, label=label)
+        if limit_col is not None:
+            for pos, value, at_limit in zip(positions, table[col], table[limit_col]):
+                if at_limit:
+                    ax.annotate("*", (pos, value), ha="center", va="bottom", fontsize=12)
+    ax.axhline(0, color=REFERENCE_COLOR, linewidth=0.8)
+    ax.set_xticks(x, table["param"], rotation=30)
+    ax.set_title("Sensibilidad ±20% de θ_final global (Calmar en todo el archivo de train; * = en el limite)")
+    ax.set_xlabel("Parametro movido (uno a la vez)")
+    ax.set_ylabel("Calmar")
+    ax.legend(frameon=False)
+    _style(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_cost_curve(curves: dict, real_bps: float = 12.5) -> plt.Figure:
+    """Retorno neto de la curva OOS contra la comision por lado, una linea por curva.
+
+    Recibe {nombre: salida de optimize.oos_cost_curve}. Marca la comision
+    real con una linea vertical y el retorno 0 con una horizontal.
+    """
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for name, curve in curves.items():
+        ax.plot(curve.index, curve["total_return"] * 100, marker="o", markersize=3, linewidth=1.8,
+                color=CURVE_COLORS.get(name, STRATEGY_COLOR), label=name)
+    ax.axvline(real_bps, color=REFERENCE_COLOR, linestyle="--", linewidth=1,
+               label=f"comision real ({real_bps} pb por lado)")
+    ax.axhline(0, color="#1f1e1c", linewidth=0.8)
+    ax.set_title("Retorno neto OOS contra costo de transaccion (mismas entradas, solo cambia la comision)")
+    ax.set_xlabel("Comision por lado (pb)")
+    ax.set_ylabel("Retorno neto total (%)")
+    ax.legend(frameon=False)
+    _style(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_correlation(corr_votes: pd.DataFrame, corr_indicators: pd.DataFrame) -> plt.Figure:
+    """Dos heatmaps con numeros: correlacion de los votos y de los indicadores (velas de 4h)."""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, corr, title in [(axes[0], corr_votes, "Votos"), (axes[1], corr_indicators, "Indicadores")]:
+        image = ax.imshow(corr.to_numpy(), cmap="RdBu_r", vmin=-1, vmax=1)
+        for i in range(len(corr)):
+            for j in range(len(corr)):
+                ax.text(j, i, f"{corr.iloc[i, j]:.2f}", ha="center", va="center", fontsize=10)
+        ax.set_xticks(range(len(corr)), corr.columns, rotation=30)
+        ax.set_yticks(range(len(corr)), corr.index)
+        ax.set_title(f"Correlacion entre {title.lower()} (4h, train)")
+        ax.set_xlabel(title)
+        ax.set_ylabel(title)
+        fig.colorbar(image, ax=ax, label="Correlacion de Pearson")
+    fig.tight_layout()
+    return fig
+
+
+def _regime_runs(regimes: pd.Series) -> list[tuple]:
+    """Rachas consecutivas de un mismo regimen: (inicio, fin, regimen)."""
+    clean = regimes.dropna()
+    run_id = (clean != clean.shift()).cumsum()
+    return [(group.index[0], group.index[-1], group.iloc[0]) for _, group in clean.groupby(run_id)]
+
+
+def plot_portfolio_regimes(equity: pd.Series, regimes: pd.Series, benchmark: pd.Series,
+                           title: str) -> plt.Figure:
+    """Valor del portafolio OOS con el regimen de cada momento como franja de color de fondo."""
+    fig, ax = plt.subplots(figsize=(13, 5))
+    for start, end, regime in _regime_runs(regimes):
+        ax.axvspan(start, end, color=REGIME_COLORS[regime], alpha=0.15, linewidth=0)
+    ax.plot(benchmark.index, benchmark, color=BENCHMARK_COLOR, linewidth=1.2, label="buy & hold")
+    ax.plot(equity.index, equity, color="#1f1e1c", linewidth=1.8, label="con régimen")
+    ax.set_title(title)
+    ax.set_xlabel("Fecha")
+    ax.set_ylabel("Valor del portafolio (USD)")
+    _usd(ax)
+    curve_handles, _ = ax.get_legend_handles_labels()
+    ax.legend(handles=curve_handles + _regime_handles(), loc="upper left", frameon=False, ncol=2)
+    _style(ax)
     fig.tight_layout()
     return fig

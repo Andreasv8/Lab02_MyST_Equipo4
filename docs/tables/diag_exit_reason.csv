@@ -1,0 +1,10 @@
+curve,exit_reason,n_trades,win_rate,total_pnl
+con_regimen,max_holding,22,68.18181818181817,124072.0101999725
+con_regimen,opposite_signal,70,15.714285714285714,-184816.99148569856
+con_regimen,regime_exit,1,100.0,18246.290525572116
+con_regimen,stop_loss,54,0.0,-586172.7929321992
+con_regimen,take_profit,15,100.0,292793.7457060419
+solo_global,max_holding,27,70.37037037037037,169308.4012213772
+solo_global,opposite_signal,62,16.129032258064516,-160582.66337728692
+solo_global,stop_loss,35,0.0,-423883.70737565384
+solo_global,take_profit,13,100.0,316405.52762073406

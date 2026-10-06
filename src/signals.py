@@ -6,6 +6,8 @@ Todas las funciones son causales: el valor en la barra t solo usa datos
 hasta t (ver tests/test_causality.py).
 """
 
+from typing import Optional
+
 import pandas as pd
 
 from src.data import align_to_base, resample_ohlc
@@ -176,18 +178,20 @@ def entry_signal(state: pd.Series) -> pd.Series:
     return state.where(state != previous, 0).astype(int)
 
 
-def compute_strategy(df: pd.DataFrame, params: dict = THETA0) -> pd.DataFrame:
-    """Calcula indicadores, votos, estado y señal de la estrategia final.
+# Columnas de voto que puede usar la opcion de un solo voto (analisis de robustez).
+SINGLE_VOTES = {"ema": "vote_ema", "roc": "vote_roc", "bb": "vote_bb"}
 
-    Los indicadores se calculan en velas de 4h y se pasan a 5 min con
-    align_to_base: una vela de 4h solo se usa cuando ya cerro (sin look-ahead).
-    La señal se toma al cierre de la barra t de 5 min; el motor la ejecuta
-    al open de t+1.
 
-    Recibe las velas de 5 min (Open, High, Low, Close) y los parametros θ.
-    Regresa un DataFrame con el mismo indice que df y las columnas ema_fast,
-    ema_slow, roc, percent_b, adx, atr, vote_ema, vote_roc, vote_bb, state
-    y signal.
+def strategy_features_4h(df: pd.DataFrame, params: dict = THETA0,
+                         single_vote: Optional[str] = None) -> pd.DataFrame:
+    """Indicadores, votos y estado de la estrategia en velas de 4h (antes de pasar a 5 min).
+
+    Con single_vote ("ema", "roc" o "bb") el estado usa solo ese voto: basta
+    1 voto a favor, con el mismo filtro de ADX. Sirve para comparar un
+    indicador solo contra la regla 2 de 3 (docs/SPEC.md, seccion 14.3).
+
+    Recibe las velas de 5 min, los parametros θ y, opcional, el voto unico.
+    Regresa un DataFrame indexado por el inicio de cada vela de 4h.
     """
     # 1. Indicadores en velas de 4h.
     bars = resample_ohlc(df, TIMEFRAME)
@@ -203,17 +207,58 @@ def compute_strategy(df: pd.DataFrame, params: dict = THETA0) -> pd.DataFrame:
     # Sin voto de EMA hasta que la EMA lenta tenga historia suficiente.
     features.loc[features.index[:params["ema_slow"] - 1], ["ema_fast", "ema_slow"]] = float("nan")
 
-    # 2. Votos y estado, tambien en 4h.
+    # 2. Votos y estado, tambien en 4h (regla 2 de 3, o un solo voto).
     votes = strategy_votes(features["ema_fast"], features["ema_slow"], features["roc"],
                            features["percent_b"], params["bb_threshold"])
     features = features.join(votes)
-    features["state"] = confirmed_state(votes, features["adx"], params["adx_threshold"])
+    if single_vote is None:
+        features["state"] = confirmed_state(votes, features["adx"], params["adx_threshold"])
+    else:
+        only = votes[[SINGLE_VOTES[single_vote]]]
+        features["state"] = confirmed_state(only, features["adx"], params["adx_threshold"], min_votes=1)
+    return features
+
+
+def compute_strategy(df: pd.DataFrame, params: dict = THETA0,
+                     single_vote: Optional[str] = None) -> pd.DataFrame:
+    """Calcula indicadores, votos, estado y señal de la estrategia final.
+
+    Los indicadores se calculan en velas de 4h y se pasan a 5 min con
+    align_to_base: una vela de 4h solo se usa cuando ya cerro (sin look-ahead).
+    La señal se toma al cierre de la barra t de 5 min; el motor la ejecuta
+    al open de t+1. single_vote ("ema", "roc" o "bb") usa un solo voto en vez
+    de la regla 2 de 3 (solo para el analisis de robustez).
+
+    Recibe las velas de 5 min (Open, High, Low, Close) y los parametros θ.
+    Regresa un DataFrame con el mismo indice que df y las columnas ema_fast,
+    ema_slow, roc, percent_b, adx, atr, vote_ema, vote_roc, vote_bb, state
+    y signal.
+    """
+    features = strategy_features_4h(df, params, single_vote)
 
     # 3. Pasar a 5 min sin look-ahead; antes de la primera vela cerrada no hay voto.
     aligned = align_to_base(features, df.index, TIMEFRAME)
-    for col in [*votes.columns, "state"]:
+    for col in [*SINGLE_VOTES.values(), "state"]:
         aligned[col] = aligned[col].fillna(0).astype(int)
 
     # 4. Señal de entrada: solo en la barra de 5 min donde cambia el estado.
     aligned["signal"] = entry_signal(aligned["state"])
     return aligned
+
+
+def indicator_correlation(df: pd.DataFrame, params: dict = THETA0) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Correlacion entre los tres votos y entre los indicadores, en velas de 4h.
+
+    La distancia entre EMAs se normaliza: (EMA_rapida - EMA_lenta) / EMA_lenta,
+    para que no dependa del nivel de precio. Se ignoran las velas de calentamiento.
+    Regresa (correlacion de votos, correlacion de indicadores).
+    """
+    features = strategy_features_4h(df, params).dropna()
+    votes = features[list(SINGLE_VOTES.values())]
+    indicators = pd.DataFrame({
+        "ema_gap": (features["ema_fast"] - features["ema_slow"]) / features["ema_slow"],
+        "roc": features["roc"],
+        "percent_b": features["percent_b"],
+        "adx": features["adx"],
+    })
+    return votes.corr(), indicators.corr()
