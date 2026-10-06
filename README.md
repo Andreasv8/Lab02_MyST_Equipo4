@@ -41,9 +41,9 @@ python -m pytest -q
 
 | Constante | Archivo | Uso |
 |---|---|---|
-| `SEED = 42` | `src/optimization.py` | Semilla del `TPESampler` de Optuna; `src/walk_forward.py` la importa para su propia optimización. |
-| `SEED = 42` | `src/regimes.py` | `random_state` de K-means. |
-| `HMM_SEEDS = range(10)` | `src/regimes.py` | El HMM se ajusta con las semillas 0–9 y se conserva el de mayor log-likelihood en train. |
+| `SEED = 42` | `src/optimize.py` | Semilla del `TPESampler` de Optuna. Cada ventana del walk-forward usa `SEED + número de ventana`. |
+| `SEED = 42` | `src/regimes.py` | `random_state` de K-means (solo para comparar regímenes). |
+| `HMM_SEEDS = range(10)` | `src/regimes.py` | El HMM (solo para comparar) se ajusta con las semillas 0–9 y se queda el de mayor log-likelihood. |
 
 ## Estructura del repositorio
 
@@ -66,6 +66,7 @@ python -m pytest -q
 │   ├── backtest.py
 │   ├── data.py
 │   ├── metrics.py
+│   ├── optimize.py
 │   ├── plots.py
 │   ├── regimes.py
 │   └── signals.py
@@ -79,6 +80,7 @@ python -m pytest -q
     ├── test_data.py
     ├── test_execution.py
     ├── test_metrics.py
+    ├── test_optimize.py
     └── test_regimes.py
 ```
 

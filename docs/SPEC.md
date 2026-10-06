@@ -201,3 +201,96 @@ Qué pasa con las posiciones cuando cambia el régimen:
 - **R5.** Si en una ventana de entrenamiento del walk-forward un régimen no llega al mínimo de
   operaciones, ese régimen usa los parámetros globales de esa ventana (así no se optimiza con
   muy pocos datos).
+
+## 12. Walk-forward (pre-registro)
+
+Esta sección y las dos siguientes se escriben **antes** de correr nada: es el pre-registro. Lo que diga
+aquí no se cambia después de ver resultados.
+
+**Ventanas** (`make_windows` en `src/optimize.py`), sobre el archivo de train:
+
+- Las ventanas se anclan en la **semana de test**: cada semana de test dura 7 días y la siguiente empieza
+  donde termina la anterior (avance de 7 días, sin traslape).
+- El train de cada ventana es el **mes** justo antes de su semana de test (de 28 a 31 días según el mes).
+  La semana de test empieza donde termina el train.
+- El primer train empieza el 2022-07-01; el mes de junio de 2022 sirve de calentamiento.
+- Resultan **73 ventanas**. La última es la última cuya semana de test termina dentro del archivo.
+
+**Optimización en cada ventana:**
+
+- Régimen por reglas con el umbral ajustado hasta la última barra del train (ventana expansiva).
+- Indicadores calculados con 60 días de calentamiento antes del train; el backtest y el objetivo usan
+  solo las barras del train.
+- **4 estudios** de Optuna: `global` (entradas en cualquier barra) y uno por régimen (`crisis`, `trend`,
+  `mean_reversion`), donde solo se permiten entradas en barras de señal de ese régimen.
+- **N_TRIALS = 100** por estudio. Sampler TPE con 30 trials aleatorios al inicio y semilla
+  42 + número de ventana.
+- **Objetivo:** Calmar del train.
+- **Mínimo de operaciones:** 5 en el estudio global y 3 en cada régimen. Un trial con menos operaciones
+  (o con Calmar no finito) es inválido. Son mínimos bajos porque en un mes hay unas 15 señales; es una
+  limitación del diseño.
+- Se elige el **mejor trial válido** de cada estudio. Si un régimen no tiene trial válido se aplica R5
+  (usa los parámetros globales de esa ventana); si tampoco el global tiene, esa semana no se opera.
+- Total de configuraciones evaluadas: 73 × 4 × 100 = **29,200**.
+
+Espacio de búsqueda: `ema_fast` 5–30, `slow_ratio` 2–6 (`ema_slow = round(ema_fast · slow_ratio)`),
+`roc_window` 6–42, `bb_window` 10–40, `bb_threshold` 0.55–0.90, `adx_threshold` 15–35, `sl_mult` 1–4,
+`rr` 1–8, `max_holding` 288–4032 barras (1 a 14 días), `rho` 0.005–0.02. Fijos: `bb_std` 2,
+`adx_window` 14, `atr_window` 14.
+
+**Curva fuera de muestra (OOS):** las 73 semanas de test se juntan en **una sola curva continua** con
+capital inicial de 1,000,000. Cada barra usa los parámetros de su semana y de su régimen, con las reglas
+de transición R1–R5. Se comparan tres curvas sobre el mismo periodo:
+
+1. **Con régimen** (θ*_régimen, con R3: salida al entrar a crisis);
+2. **Solo global** (θ* global de cada semana, sin capa de régimen);
+3. **Buy & hold.**
+
+**Limitación:** la primera ventana solo tiene 30 días de calentamiento (los datos empiezan el
+2022-06-01), así que en su semana puede haber menos señales.
+
+## 13. Evaluación final en el archivo de test (pre-registro)
+
+Se hace **una sola vez, al final**, con `btc_project_test.csv`.
+
+- **θ_final:** para cada estudio (global y cada régimen), la **mediana** de cada parámetro del espacio
+  de búsqueda (`ema_fast`, `slow_ratio`, `roc_window`, `bb_window`, `bb_threshold`, `adx_threshold`,
+  `sl_mult`, `rr`, `max_holding`, `rho`) sobre los θ elegidos en las 73 ventanas. Los parámetros enteros
+  se redondean. Las ventanas sin trial válido en ese estudio no cuentan.
+- `ema_slow` no se toma de la mediana: se recalcula como
+  `round(ema_fast_mediana · slow_ratio_mediana)`, y si queda <= `ema_fast` se usa `ema_fast + 1`.
+  Los parámetros fijos (`bb_std`, `adx_window`, `atr_window`) no cambian.
+- **Umbral de régimen:** ajustado con todo el archivo de train.
+- **Datos:** los indicadores y los regímenes se calculan sobre train y test pegados, que solo usan el
+  pasado. Solo se cuentan las operaciones del **2024-05-02 al 2024-06-03**.
+- **Limitación declarada:** el archivo de test trae un día suelto (2023-12-31) y después un hueco de
+  122 días, así que los indicadores pasan por encima de ese hueco.
+- Se reportan las mismas tres curvas: con régimen, solo global y buy & hold.
+- **No se cambia nada después de ver este resultado.**
+
+## 14. Análisis de robustez (pre-registro)
+
+Definidos antes de ver resultados:
+
+1. **Sensibilidad ±20%:** cada parámetro de θ_final global se mueve +20% y −20%, uno a la vez (los
+   demás fijos). Se mide el Calmar sobre todo el archivo de train. Sirve para ver si estamos en una
+   meseta o en un pico (sobreajuste). Reglas:
+   - Se mueven solo los parámetros del espacio de búsqueda: `ema_fast`, `slow_ratio`, `roc_window`,
+     `bb_window`, `bb_threshold`, `adx_threshold`, `sl_mult`, `rr`, `max_holding` y `rho`.
+   - Los enteros se redondean y se mueven **al menos 1 unidad**.
+   - Todo valor se recorta a los límites del espacio de búsqueda. Si el recorte deja el valor igual al
+     original, se reporta como **"en el límite"**.
+   - `ema_slow` se recalcula como `round(ema_fast · slow_ratio)`; si queda <= `ema_fast`, se usa
+     `ema_fast + 1`.
+2. **Costos de transacción:** curva de retorno neto contra costo por lado, de 0 a 50 pb, sobre la curva
+   OOS del walk-forward. Se usan **exactamente las mismas entradas por barra** de la curva OOS (señal,
+   ATR, sl, tp, holding, rho y force_exit) y solo cambia la comisión por lado. No se vuelve a optimizar
+   ni se recalcula la señal. Se reporta el **break-even** (costo donde el retorno llega a 0) y el margen
+   contra el costo real de 0.125% por lado. En el código será una función nueva (`oos_cost_curve`);
+   `cost_sensitivity` se queda para un solo θ.
+3. **Un indicador contra 2 de 3:** con θ_final en train, se corre la estrategia con un solo voto (EMA
+   sola, ROC sola, Bollinger sola) y con la regla 2 de 3. Se reporta el número de operaciones y el Calmar.
+4. **Métricas por régimen** sobre las operaciones OOS, agrupadas por el régimen en la entrada: número
+   de trades, win rate, retorno promedio por trade con intervalo bootstrap del 95% (semilla 42) y prueba
+   de Kruskal-Wallis para ver si los retornos difieren entre regímenes.
+5. **Correlación entre los tres votos** y entre los indicadores, en velas de 4h, solo con datos de train.

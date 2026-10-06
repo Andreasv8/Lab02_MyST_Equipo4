@@ -1,0 +1,339 @@
+"""Optimizacion por ventana y walk-forward de lab_02 (PDF 3.2, 3.3 y 3.4).
+
+En cada ventana se entrena 1 mes y se prueba la semana siguiente:
+1. Regimenes por reglas con umbral ajustado hasta el fin del train (rule_regimes).
+2. Cuatro estudios de Optuna: "global" y uno por regimen. El objetivo es el
+   Calmar del train.
+3. La semana de test se opera con los parametros de su ventana y del regimen de
+   cada barra (reglas de transicion R1-R5 en docs/SPEC.md).
+
+Todas las semanas de test se juntan en una sola curva fuera de muestra (OOS)
+con un backtest continuo.
+"""
+
+import time
+from typing import Optional
+
+import joblib
+import numpy as np
+import optuna
+import pandas as pd
+
+from src.backtest import BacktestResult, backtest, config_from_params
+from src.metrics import calmar_ratio
+from src.regimes import REGIME_NAMES, rule_regimes
+from src.signals import THETA0, compute_strategy
+
+SEED = 42
+N_TRIALS = 100                    # por estudio (PDF: 100 a 200 por ventana y por regimen)
+N_STARTUP_TRIALS = 30             # primero aleatorio, despues TPE
+
+# Minimo de operaciones para que un trial cuente. Son bajos porque en 1 mes de
+# train hay ~15 señales; es una limitacion que se declara en el reporte.
+MIN_TRADES_GLOBAL = 5
+MIN_TRADES_REGIME = 3
+INVALID_SCORE = -1e6              # valor de un trial invalido
+
+FIRST_TRAIN_START = "2022-07-01"  # el primer mes de datos sirve de calentamiento
+WARMUP = pd.Timedelta(days=60)    # historia previa para calcular indicadores
+BAR = pd.Timedelta(minutes=5)
+CAPITAL = 1_000_000.0
+STUDIES = ["global", *REGIME_NAMES]
+PARAM_COLUMNS = ["sl_mult", "tp_mult", "max_holding", "rho"]
+
+
+# ---------------------------------------------------------------------------
+# 1. Ventanas (PDF 3.3)
+# ---------------------------------------------------------------------------
+
+def make_windows(index: pd.DatetimeIndex, first_train_start: str = FIRST_TRAIN_START,
+                 train_months: int = 1, test_days: int = 7) -> list[dict]:
+    """Arma las ventanas del walk-forward: train de 1 mes y test de la semana siguiente.
+
+    Las semanas de test avanzan 7 dias exactos y no se traslapan. Cada train es
+    el mes justo antes de su semana de test (train_start = test_start - 1 mes),
+    asi que el train dura de 28 a 31 dias segun el mes. Todos los intervalos
+    son [inicio, fin): la semana de test empieza donde termina el train.
+    Se queda la ultima ventana cuya semana de test termina dentro del archivo.
+
+    Recibe el indice de las barras de 5 min y la fecha de inicio del primer train.
+    Regresa una lista de dicts con train_start, train_end, test_start y test_end.
+    """
+    end_of_data = index[-1] + BAR
+    test_start = pd.Timestamp(first_train_start) + pd.DateOffset(months=train_months)
+    windows = []
+    while test_start + pd.Timedelta(days=test_days) <= end_of_data:
+        windows.append({
+            "train_start": test_start - pd.DateOffset(months=train_months),
+            "train_end": test_start,
+            "test_start": test_start,
+            "test_end": test_start + pd.Timedelta(days=test_days),
+        })
+        test_start += pd.Timedelta(days=test_days)
+    return windows
+
+
+def _between(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """Barras con start <= t < end."""
+    return df[(df.index >= start) & (df.index < end)]
+
+
+# ---------------------------------------------------------------------------
+# 2. Optimizacion de una ventana (PDF 3.2)
+# ---------------------------------------------------------------------------
+
+def suggest_params(trial: optuna.Trial) -> dict:
+    """Pide a Optuna un juego de parametros θ dentro del espacio de busqueda.
+
+    Busca ventanas, umbrales, SL, TP y tamaño; bb_std, adx_window y atr_window
+    quedan fijos. La EMA lenta se define como multiplo de la rapida para que
+    siempre sea mas lenta.
+    Recibe el trial. Regresa un dict con las mismas llaves que THETA0 (mas slow_ratio).
+    """
+    ema_fast = trial.suggest_int("ema_fast", 5, 30)
+    slow_ratio = trial.suggest_float("slow_ratio", 2.0, 6.0)
+    return {
+        "ema_fast": ema_fast,
+        "ema_slow": int(round(ema_fast * slow_ratio)),
+        "slow_ratio": slow_ratio,
+        "roc_window": trial.suggest_int("roc_window", 6, 42),
+        "bb_window": trial.suggest_int("bb_window", 10, 40),
+        "bb_std": 2,
+        "bb_threshold": trial.suggest_float("bb_threshold", 0.55, 0.90),
+        "adx_window": 14,
+        "adx_threshold": trial.suggest_float("adx_threshold", 15.0, 35.0),
+        "atr_window": 14,
+        "sl_mult": trial.suggest_float("sl_mult", 1.0, 4.0),
+        "rr": trial.suggest_float("rr", 1.0, 8.0),
+        "max_holding": trial.suggest_int("max_holding", 288, 4032),   # 1 a 14 dias
+        "rho": trial.suggest_float("rho", 0.005, 0.02),
+    }
+
+
+def train_score(df_warm: pd.DataFrame, train_index: pd.DatetimeIndex, labels: pd.Series,
+                params: dict, regime: Optional[str]) -> tuple[float, int]:
+    """Calmar y numero de trades de θ en las barras de train.
+
+    Los indicadores se calculan con el calentamiento (df_warm) y el backtest
+    solo corre en las barras de train. Si regime no es None, solo se permiten
+    entradas en barras de señal de ese regimen.
+    Regresa (calmar, n_trades).
+    """
+    features = compute_strategy(df_warm, params).loc[train_index]
+    signal = features["signal"]
+    if regime is not None:
+        signal = signal.where(labels.loc[train_index] == regime, 0)
+    result = backtest(df_warm.loc[train_index], signal, features["atr"],
+                      config_from_params(params, CAPITAL))
+    return calmar_ratio(result.equity["equity"]), len(result.trades)
+
+
+def run_study(df_warm: pd.DataFrame, train_index: pd.DatetimeIndex, labels: pd.Series,
+              regime: Optional[str], n_trials: int, seed: int) -> Optional[dict]:
+    """Un estudio de Optuna que maximiza el Calmar de train.
+
+    Un trial con menos trades que el minimo, o con Calmar no finito, es
+    invalido y recibe INVALID_SCORE.
+    Regresa el mejor trial valido como {"params", "calmar", "n_trades"}, o None.
+    """
+    min_trades = MIN_TRADES_GLOBAL if regime is None else MIN_TRADES_REGIME
+
+    def objective(trial: optuna.Trial) -> float:
+        params = suggest_params(trial)
+        calmar, n_trades = train_score(df_warm, train_index, labels, params, regime)
+        trial.set_user_attr("params", params)
+        trial.set_user_attr("n_trades", n_trades)
+        if n_trades < min_trades or not np.isfinite(calmar):
+            return INVALID_SCORE
+        return calmar
+
+    sampler = optuna.samplers.TPESampler(n_startup_trials=N_STARTUP_TRIALS, seed=seed)
+    study = optuna.create_study(direction="maximize", sampler=sampler)
+    study.optimize(objective, n_trials=n_trials)
+
+    best = study.best_trial
+    if best.value <= INVALID_SCORE:
+        return None
+    return {"params": best.user_attrs["params"], "calmar": best.value,
+            "n_trades": best.user_attrs["n_trades"]}
+
+
+def optimize_window(df: pd.DataFrame, window: dict, number: int, n_trials: int = N_TRIALS) -> dict:
+    """Corre los 4 estudios (global y uno por regimen) de una ventana.
+
+    Solo usa datos anteriores a train_end, asi que no hay look-ahead. Los
+    regimenes se ajustan con ventana expansiva hasta la ultima barra de train.
+    Recibe todos los precios, la ventana, su numero (para la semilla) y los trials por estudio.
+    Regresa un dict con la ventana, el mejor trial de cada estudio y los trials corridos.
+    """
+    optuna.logging.set_verbosity(optuna.logging.WARNING)   # corre dentro de joblib
+    df_fit = df[df.index < window["train_end"]]
+    labels, _ = rule_regimes(df_fit, df_fit.index[-1])
+    df_warm = df_fit[df_fit.index >= window["train_start"] - WARMUP]
+    train_index = df_warm.index[df_warm.index >= window["train_start"]]
+
+    best = {}
+    for name in STUDIES:
+        regime = None if name == "global" else name
+        best[name] = run_study(df_warm, train_index, labels, regime, n_trials, SEED + number)
+    return {"number": number, **window, "best": best, "n_trials": len(STUDIES) * n_trials}
+
+
+def select_params(best: dict) -> tuple[dict, dict]:
+    """Elige los parametros de cada estudio aplicando la regla R5.
+
+    Un regimen sin trial valido usa los parametros globales de la ventana. Si
+    tampoco el global tiene trial valido, la semana no se opera (todo None).
+    Recibe {estudio: mejor trial o None}.
+    Regresa ({estudio: params o None}, {regimen: True si uso R5}).
+    """
+    if best["global"] is None:
+        return {name: None for name in STUDIES}, {regime: False for regime in REGIME_NAMES}
+
+    global_params = best["global"]["params"]
+    params, used_r5 = {"global": global_params}, {}
+    for regime in REGIME_NAMES:
+        used_r5[regime] = best[regime] is None
+        params[regime] = global_params if used_r5[regime] else best[regime]["params"]
+    return params, used_r5
+
+
+def run_walk_forward(df: pd.DataFrame, n_trials: int = N_TRIALS, n_jobs: int = -1,
+                     windows: Optional[list[dict]] = None) -> tuple[list[dict], float, int]:
+    """Optimiza todas las ventanas en paralelo con joblib.
+
+    Recibe los precios, los trials por estudio, los procesos (-1 = todos los
+    nucleos) y, opcional, las ventanas (por defecto make_windows).
+    Regresa (resultado por ventana, segundos que tardo, configuraciones evaluadas).
+    """
+    windows = make_windows(df.index) if windows is None else windows
+    start = time.perf_counter()
+    results = joblib.Parallel(n_jobs=n_jobs)(
+        joblib.delayed(optimize_window)(df, window, number, n_trials)
+        for number, window in enumerate(windows))
+    seconds = time.perf_counter() - start
+    n_configs = sum(result["n_trials"] for result in results)
+    return results, seconds, n_configs
+
+
+def window_table(results: list[dict]) -> pd.DataFrame:
+    """Tabla con una fila por (ventana, estudio).
+
+    Columnas: fechas, si el estudio tuvo trial valido, Calmar y trades de
+    train del mejor trial, si se uso R5, si la semana se opera y los
+    parametros elegidos.
+    """
+    rows = []
+    for result in results:
+        params, used_r5 = select_params(result["best"])
+        for name in STUDIES:
+            best = result["best"][name]
+            rows.append({
+                "window": result["number"],
+                "train_start": result["train_start"],
+                "test_start": result["test_start"],
+                "study": name,
+                "valid": best is not None,
+                "calmar_train": best["calmar"] if best else np.nan,
+                "n_trades_train": best["n_trades"] if best else 0,
+                "used_r5": used_r5.get(name, False),
+                "operated": params["global"] is not None,
+                **(params[name] or {}),
+            })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# 3. Curva fuera de muestra (OOS)
+# ---------------------------------------------------------------------------
+
+def crisis_entries(labels: pd.Series) -> pd.Series:
+    """True solo en las barras donde el regimen CAMBIA a crisis (regla R3)."""
+    is_crisis = labels == "crisis"
+    return is_crisis & ~is_crisis.shift(1, fill_value=False)
+
+
+def _bar_params(params: dict) -> dict:
+    """Parametros de salida y tamaño que el motor usa por barra (tp_mult = rr · sl_mult)."""
+    return {"sl_mult": params["sl_mult"], "tp_mult": params["rr"] * params["sl_mult"],
+            "max_holding": params["max_holding"], "rho": params["rho"]}
+
+
+def empty_inputs(regimes: pd.Series) -> pd.DataFrame:
+    """Entradas del motor sin operar: señal 0, ATR NaN y THETA0 como relleno."""
+    inputs = pd.DataFrame({"regime": regimes, "signal": 0, "atr": np.nan}, index=regimes.index)
+    for col, value in _bar_params(THETA0).items():
+        inputs[col] = value
+    return inputs
+
+
+def fill_inputs(inputs: pd.DataFrame, bars: pd.Index, features: pd.DataFrame,
+                params: dict) -> pd.DataFrame:
+    """Pone en las barras dadas la señal y el ATR de features y los parametros de params.
+
+    Regresa una copia de inputs con esas barras llenas.
+    """
+    out = inputs.copy()
+    out.loc[bars, "signal"] = features.loc[bars, "signal"]
+    out.loc[bars, "atr"] = features.loc[bars, "atr"]
+    for col, value in _bar_params(params).items():
+        out.loc[bars, col] = value
+    return out
+
+
+def week_inputs(df: pd.DataFrame, result: dict, use_regimes: bool = True) -> pd.DataFrame:
+    """Señal, ATR y parametros por barra de la semana de test de una ventana.
+
+    Con use_regimes, cada barra usa los parametros del regimen vigente en ella
+    (con R5 ya aplicado); sin regimen (calentamiento) no se opera. Sin
+    use_regimes, toda la semana usa los parametros globales.
+    Los regimenes usan el mismo umbral que en el ajuste (fit hasta la ultima
+    barra de train), y los indicadores se calculan con 60 dias de calentamiento.
+    """
+    df_hist = df[df.index < result["test_end"]]
+    last_train_bar = df_hist.index[df_hist.index < result["train_end"]][-1]
+    labels, _ = rule_regimes(df_hist, last_train_bar)
+    df_warm = df_hist[df_hist.index >= result["test_start"] - WARMUP]
+    week_index = df_hist.index[df_hist.index >= result["test_start"]]
+
+    inputs = empty_inputs(labels.loc[week_index])
+    params, _ = select_params(result["best"])
+    for name in (REGIME_NAMES if use_regimes else ["global"]):
+        if params[name] is None:
+            continue                     # la semana no se opera
+        features = compute_strategy(df_warm, params[name]).loc[week_index]
+        bars = week_index if name == "global" else week_index[inputs["regime"] == name]
+        inputs = fill_inputs(inputs, bars, features, params[name])
+    return inputs
+
+
+def build_oos_inputs(df: pd.DataFrame, results: list[dict], use_regimes: bool = True) -> pd.DataFrame:
+    """Junta las semanas de test en una sola tabla por barra para el backtest OOS.
+
+    force_exit es True solo donde el regimen cambia a crisis (R3), y solo
+    cuando se usa la capa de regimen.
+    """
+    inputs = pd.concat([week_inputs(df, result, use_regimes) for result in results])
+    inputs["force_exit"] = crisis_entries(inputs["regime"]) if use_regimes else False
+    return inputs
+
+
+def run_oos(df: pd.DataFrame, inputs: pd.DataFrame, capital: float = CAPITAL) -> BacktestResult:
+    """Un solo backtest continuo sobre todas las semanas de test, con parametros por barra.
+
+    Las posiciones pueden cruzar de una semana a otra y conservan los
+    parametros con los que entraron (R1).
+    """
+    config = config_from_params(THETA0, capital)   # los escalares no se usan: todo va por barra
+    return backtest(df.loc[inputs.index], inputs["signal"], inputs["atr"], config,
+                    sl_mult=inputs["sl_mult"], tp_mult=inputs["tp_mult"],
+                    max_holding=inputs["max_holding"], force_exit=inputs["force_exit"],
+                    rho=inputs["rho"])
+
+
+def run_oos_both(df: pd.DataFrame, results: list[dict], capital: float = CAPITAL) -> dict:
+    """Curva OOS con capa de regimen (θ*_regimen) y solo global (θ*), para compararlas."""
+    return {
+        "regimen": run_oos(df, build_oos_inputs(df, results, use_regimes=True), capital),
+        "global": run_oos(df, build_oos_inputs(df, results, use_regimes=False), capital),
+    }
