@@ -585,3 +585,55 @@ def pnl_breakdown(trades: pd.DataFrame) -> pd.Series:
         "win_rate": 100 * (pnl > 0).mean(),
         "break_even_win_rate": 100 / (1 + payoff),
     })
+
+
+# ---------------------------------------------------------------------------
+# Impacto de mercado (PDF seccion 4: advertencia obligatoria)
+# ---------------------------------------------------------------------------
+
+def market_impact_table(df: pd.DataFrame, trades_by_curve: dict, break_even_bps: float) -> pd.DataFrame:
+    """Estimacion simple del impacto de mercado de nuestras ordenes (con el archivo de train).
+
+    Compara el nocional promedio por trade (unidades · precio de entrada) con
+    el volumen en dolares de una barra de 5 min y de una vela de 4h (medianas,
+    solo barras con volumen > 0), y estima el costo extra con el modelo de
+    raiz cuadrada:
+
+        impacto ≈ σ_5min · sqrt(nocional / volumen_5min)
+
+    σ_5min es la desviacion estandar de los rendimientos de 5 min. El modelo
+    es solo un orden de magnitud: supone que la orden se ejecuta en una barra
+    y que el volumen observado es todo el que hay.
+
+    Supuestos y limitaciones:
+    - La columna Volume ya esta en dolares (Yahoo BTC-USD): multiplicarla por
+      el precio daria volumenes absurdos.
+    - El volumen falta en ~48% de las barras del archivo crudo (quedan en 0
+      tras la limpieza); se usan solo barras con volumen > 0.
+
+    Recibe las velas de 5 min de train, {curva: trades} y el break-even en pb
+    por lado de la curva de costos.
+    Regresa una fila por curva.
+    """
+    volume_5min = df.loc[df["Volume"] > 0, "Volume"]
+    volume_4h = df["Volume"].resample("4h").sum()
+    volume_4h = volume_4h[volume_4h > 0]
+    sigma = returns(df["Close"]).std()
+    rows = {}
+    for name, trades in trades_by_curve.items():
+        notional = (trades["shares"] * trades["raw_entry_price"]).mean()
+        participation = notional / volume_5min.median()
+        impact_bps = sigma * math.sqrt(participation) * 10_000
+        rows[name] = {
+            "avg_notional_usd": notional,
+            "median_volume_5min_usd": volume_5min.median(),
+            "median_volume_4h_usd": volume_4h.median(),
+            "participation_5min_pct": 100 * participation,
+            "participation_4h_pct": 100 * notional / volume_4h.median(),
+            "sigma_5min": sigma,
+            "impact_bps": impact_bps,
+            "break_even_bps": break_even_bps,
+            "impact_vs_break_even_pct": 100 * impact_bps / break_even_bps,
+            "bars_without_volume_pct": 100 * (df["Volume"] <= 0).mean(),
+        }
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("curve")

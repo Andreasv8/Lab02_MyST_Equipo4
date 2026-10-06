@@ -8,7 +8,9 @@ archivo de train (btc_project_train.csv):
 4. θ_final global sobre todo el archivo de train (dentro de muestra).
 5. Robustez pre-registrada (docs/SPEC.md, seccion 14), salidas de regimen
    del Nivel B y diagnostico de las perdidas.
-6. Figuras en docs/figures y tablas en docs/tables.
+6. Evaluacion final en btc_project_test.csv (docs/SPEC.md, seccion 13). Se
+   corre una sola vez y no se cambia nada despues de ver el resultado.
+7. Figuras en docs/figures y tablas en docs/tables.
 
 Uso: python main.py
 """
@@ -23,17 +25,20 @@ matplotlib.use("Agg")   # solo guarda archivos, no abre ventanas
 import pandas as pd
 
 from src.backtest import COMMISSION_RATE, BacktestResult, backtest, config_from_params
-from src.data import load_train
-from src.metrics import (buy_and_hold_equity, exit_reason_table, kruskal_by_regime, performance_summary,
+from src.data import load_test, load_train
+from src.metrics import (buy_and_hold_equity, exit_reason_table, kruskal_by_regime, market_impact_table,
+                         performance_summary,
                          pnl_breakdown, regime_trade_stats, returns_table, side_table)
 from src.optimize import (CAPITAL, N_TRIALS, REGIME_NAMES, build_oos_inputs, cost_summary,
-                          degradation_table, entry_regimes, oos_cost_curve, run_oos, run_walk_forward,
+                          degradation_table, entry_regimes, oos_cost_curve, run_final_test, run_oos,
+                          run_walk_forward,
                           sensitivity_table, single_vote_table, theta_final, transitions_table, window_table)
 from src.plots import (plot_correlation, plot_cost_curve, plot_drawdown, plot_feature_distributions,
-                       plot_portfolio, plot_portfolio_regimes, plot_regime_timeline, plot_returns_table,
+                       plot_portfolio, plot_portfolio_panels, plot_portfolio_regimes, plot_regime_timeline,
+                       plot_returns_table,
                        plot_sensitivity)
-from src.regimes import (FIT_END, FIT_START, fit_regime_models, hourly, regime_features, regime_labels,
-                         regime_validation)
+from src.regimes import (FIT_END, FIT_START, fit_regime_models, hourly,
+                         regime_features, regime_labels, regime_shares, regime_validation, rule_regimes)
 from src.signals import compute_strategy, indicator_correlation
 
 ROOT = Path(__file__).resolve().parent
@@ -232,6 +237,65 @@ def run_robustness(df: pd.DataFrame, results: list[dict], curves: dict, inputs: 
     loss_diagnostics(curves)
 
 
+def _equities(curves: dict) -> dict:
+    """{nombre: equity} de las curvas de estrategia (sin buy & hold)."""
+    return {name: r.equity["equity"] for name, r in curves.items() if name != "buy & hold"}
+
+
+def regime_shares_train_test(df_train: pd.DataFrame, test_regimes: pd.Series) -> pd.DataFrame:
+    """% de horas en cada regimen en train y en test (estabilidad fuera de muestra, PDF 3.4).
+
+    Ambos con el umbral ajustado con todo train; train sin el calentamiento.
+    """
+    train_labels, _ = rule_regimes(df_train, df_train.index[-1])
+    shares = {"train": regime_shares(hourly(train_labels.to_frame("regime"))["regime"], REGIME_NAMES),
+              "test": regime_shares(hourly(test_regimes.to_frame("regime"))["regime"], REGIME_NAMES)}
+    return pd.DataFrame(shares).rename_axis("regime")
+
+
+def final_test_step(df_train: pd.DataFrame, oos_curves: dict, final: dict) -> dict:
+    """Evaluacion final en el archivo de test (SPEC 13), mas impacto de mercado con train.
+
+    Se corre UNA sola vez. Guarda metricas, retornos, % por regimen, impacto
+    de mercado y figuras. Regresa las curvas de test.
+    """
+    df_test = load_test()
+    curves, inputs = run_final_test(df_train, df_test, final)
+    curves["buy & hold"] = buy_and_hold(df_test.loc[inputs["con régimen"].index])
+
+    save_metrics(curves, "metrics_test")
+    for freq, name in [("ME", "monthly"), ("QE", "quarterly"), ("YE", "annual")]:
+        table = pd.DataFrame({label: returns_table(r.equity["equity"], freq) for label, r in curves.items()})
+        _save(table, f"returns_test_{name}")
+    _save(regime_shares_train_test(df_train, inputs["con régimen"]["regime"]), "regime_shares_train_test")
+
+    break_even = pd.read_csv(TABLES / "cost_summary.csv", index_col=0).loc["break_even_bps", "solo_global"]
+    trades = {FILE_NAMES[name]: oos_curves[name].trades for name in FILE_NAMES}
+    _save(market_impact_table(df_train, trades, float(break_even)), "market_impact")
+
+    test_benchmark = curves["buy & hold"].equity["equity"]
+    _save_figure(plot_portfolio(_equities(curves), test_benchmark,
+                                "Evaluacion final en test (2024-05-02 a 2024-06-03): valor del portafolio"),
+                 "portfolio_test")
+    _save_figure(plot_drawdown({**_equities(curves), "buy & hold": test_benchmark},
+                               "Evaluacion final en test: drawdown"), "drawdown_test")
+    panels = {"Train: walk-forward fuera de muestra": (_equities(oos_curves),
+                                                         oos_curves["buy & hold"].equity["equity"]),
+              "Test: evaluacion final (θ_final)": (_equities(curves), test_benchmark)}
+    _save_figure(plot_portfolio_panels(panels), "portfolio_train_test")
+    return curves
+
+
+def print_final_test(curves: dict) -> None:
+    """Imprime las tablas de la evaluacion final y los trades en test de cada curva."""
+    for name in ["metrics_test", "regime_shares_train_test", "market_impact"]:
+        print(f"\n=== {name} ===")
+        print(pd.read_csv(TABLES / f"{name}.csv", index_col=0).to_string())
+    print("\n=== trades en test ===")
+    for name, result in curves.items():
+        print(f"{name}: {len(result.trades)}")
+
+
 def print_summary(results: list[dict]) -> None:
     """Imprime las tablas principales y cuantas ventanas usaron R5 por regimen."""
     pd.set_option("display.width", 160)
@@ -262,6 +326,8 @@ def main() -> None:
     save_figures(oos_curves, train_curves, returns)
     run_robustness(df, results, oos_curves, oos_inputs, final)
     print_summary(results)
+    test_curves = final_test_step(df, oos_curves, final)
+    print_final_test(test_curves)
 
 
 if __name__ == "__main__":
