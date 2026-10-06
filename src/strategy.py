@@ -10,8 +10,7 @@ from typing import Optional
 
 import pandas as pd
 
-from src.indicators import adx, atr, chaikin_money_flow, roc
-
+from src.indicators import adx, atr, directional_indicators, macd_histogram, roc, chaikin_money_flow, macd_line
 COMMISSION_RATE = 0.00125
 SLIPPAGE_RATE = 0.0005
 TOTAL_COST_RATE = COMMISSION_RATE + SLIPPAGE_RATE
@@ -22,7 +21,9 @@ BORROW_DAY_COUNT = 360
 
 # Umbral de Wilder para considerar que el mercado esta en tendencia.
 ADX_THRESHOLD = 25
-
+# Lab 02, seccion 3.1: al menos 2 de los 3 indicadores deben coincidir en direccion.
+MIN_VOTES = 2
+VOTE_COLUMNS = ["vote_roc", "vote_macd", "vote_adx"]
 
 @dataclass
 class Position:
@@ -60,73 +61,69 @@ class Position:
     raw_entry_price: float
     truncated: bool
 
+def indicator_votes(roc_values: pd.Series, macd_hist: pd.Series, plus_di: pd.Series,
+                    minus_di: pd.Series, adx_values: pd.Series,
+                    adx_threshold: float = ADX_THRESHOLD) -> pd.DataFrame:
+    """Voto de cada indicador en cada barra: +1 (largo), -1 (corto) o 0 (no vota).
 
-def confluence_signal(roc_10: pd.Series, cmf_20: pd.Series, adx_14: pd.Series,
-                      adx_threshold: float = ADX_THRESHOLD) -> pd.Series:
-    """Regla de entrada por confluencia (SPEC.md, seccion 3).
+    vote_roc  = signo(ROC)                          momento
+    vote_macd = signo(MACD - señal)                 tendencia
+    vote_adx  = signo(+DI - -DI) si ADX > umbral    tendencia; 0 si ADX <= umbral
 
-    long  si ROC > 0 y CMF > 0 y ADX > umbral
-    short si ROC < 0 y CMF < 0 y ADX > umbral
-    flat  en cualquier otro caso. Las comparaciones son estrictas, asi que
-    los NaN del warm-up y los valores exactamente 0 quedan en flat.
-
-    Parametros
-    ----------
-    roc_10, cmf_20, adx_14 : pd.Series
-        Indicadores al cierre de cada barra, con el mismo indice.
-    adx_threshold : float
-        Umbral de fuerza de tendencia (25, Wilder).
-
-    Regresa
-    -------
-    pd.Series
-        Señal por barra: 1 (long), -1 (short) o 0 (flat).
+    Los NaN del warm-up y los valores exactamente 0 no votan.
     """
-    trending = adx_14 > adx_threshold
-    signal = pd.Series(0, index=roc_10.index, dtype=int)
-    signal.loc[(roc_10 > 0) & (cmf_20 > 0) & trending] = 1
-    signal.loc[(roc_10 < 0) & (cmf_20 < 0) & trending] = -1
+    def _sign(values: pd.Series) -> pd.Series:
+        return (values > 0).astype(int) - (values < 0).astype(int)
+
+    return pd.DataFrame({
+        "vote_roc": _sign(roc_values),
+        "vote_macd": _sign(macd_hist),
+        "vote_adx": _sign(plus_di - minus_di).where(adx_values > adx_threshold, 0),
+    }, index=roc_values.index).astype(int)
+
+
+def confirmation_signal(votes: pd.DataFrame, min_votes: int = MIN_VOTES) -> pd.Series:
+    """Regla de confirmacion 2 de 3 (Lab 02, seccion 3.2).
+
+    L_t = indicadores con voto +1;  S_t = indicadores con voto -1
+    señal_t = +1 si L_t >= 2;  -1 si S_t >= 2;  0 en otro caso.
+    Con un solo indicador a favor NO se abre posicion.
+    """
+    n_long = (votes == 1).sum(axis=1)
+    n_short = (votes == -1).sum(axis=1)
+    signal = pd.Series(0, index=votes.index, dtype=int)
+    signal.loc[n_long >= min_votes] = 1
+    signal.loc[n_short >= min_votes] = -1
     return signal
 
 
-def compute_features(df: pd.DataFrame, roc_window: int = 10, cmf_window: int = 20,
-                     adx_window: int = 14, adx_threshold: float = ADX_THRESHOLD) -> pd.DataFrame:
-    """Calcula los indicadores de la estrategia y la señal (SPEC.md, secciones 2 y 3).
+def compute_features(df: pd.DataFrame, roc_window: int = 10, macd_fast: int = 12,
+                     macd_slow: int = 26, macd_signal: int = 9, adx_window: int = 14,
+                     adx_threshold: float = ADX_THRESHOLD) -> pd.DataFrame:
+    """Calcula los tres indicadores, sus votos y la señal de confirmacion 2 de 3.
 
-    Los defaults son los del SPEC (θ0). Las ventanas y el umbral se pueden
-    cambiar para la optimizacion (Act 07); el ATR queda fijo en 14 porque
-    solo define SL/TP y sizing, no la señal.
-
-    Parametros
-    ----------
-    df : pd.DataFrame
-        Debe incluir columnas "Close", "High", "Low", "Volume".
-    roc_window, cmf_window, adx_window : int
-        Ventanas de ROC, CMF y ADX.
-    adx_threshold : float
-        Umbral de ADX para considerar que hay tendencia.
-
-    Regresa
-    -------
-    pd.DataFrame
-        Columnas: roc_10, cmf_20, adx_14, atr_14, signal. signal es 1
-        (long), -1 (short) o 0 (flat). El ATR solo se usa para SL/TP y sizing.
-        Los nombres conservan el sufijo del default aunque se usen otras
-        ventanas, para no romper a quienes ya leen esas columnas.
+    Indicadores: ROC (momento), MACD (tendencia) y ADX con +DI/-DI (tendencia).
+    Ninguno usa volumen: en los datos de BTC falta en ~46% de las barras.
     """
-    close, high, low, volume = df["Close"], df["High"], df["Low"], df["Volume"]
+    close, high, low = df["Close"], df["High"], df["Low"]
 
-    roc_10 = roc(close, roc_window)
-    cmf_20 = chaikin_money_flow(high, low, close, volume, cmf_window)
-    adx_14 = adx(high, low, close, adx_window)
-    atr_14 = atr(high, low, close, 14)
+    roc_values = roc(close, roc_window)
+    macd_hist = macd_histogram(close, macd_fast, macd_slow, macd_signal)
+    plus_di, minus_di = directional_indicators(high, low, close, adx_window)
+    adx_values = adx(high, low, close, adx_window)
+    votes = indicator_votes(roc_values, macd_hist, plus_di, minus_di, adx_values, adx_threshold)
 
     return pd.DataFrame({
-        "roc_10": roc_10,
-        "cmf_20": cmf_20,
-        "adx_14": adx_14,
-        "atr_14": atr_14,
-        "signal": confluence_signal(roc_10, cmf_20, adx_14, adx_threshold),
+        "roc": roc_values,
+        "macd_hist": macd_hist,
+        "plus_di": plus_di,
+        "minus_di": minus_di,
+        "adx": adx_values,
+        "atr_14": atr(high, low, close, 14),
+        **{col: votes[col] for col in VOTE_COLUMNS},
+        "n_long": (votes == 1).sum(axis=1),
+        "n_short": (votes == -1).sum(axis=1),
+        "signal": confirmation_signal(votes),
     })
 
 

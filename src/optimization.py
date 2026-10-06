@@ -35,7 +35,9 @@ MIN_TRADES_REGIME = 10   # θ*_j por regimen
 # Parametros del SPEC (Act 06): ROC 10, CMF 20, ADX > 25, SL 2·ATR, TP 3·ATR (rr 1.5), holding 10.
 THETA0 = {
     "roc_window": 10,
-    "cmf_window": 20,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
     "adx_threshold": 25.0,
     "sl_mult": 2.0,
     "rr": 1.5,
@@ -45,7 +47,9 @@ THETA0 = {
 # Espacio de busqueda: nombre -> (tipo, minimo, maximo).
 PARAM_SPACE = {
     "roc_window": ("int", 5, 30),
-    "cmf_window": ("int", 10, 40),
+    "macd_fast": ("int", 5, 20),
+    "macd_slow": ("int", 20, 40),
+    "macd_signal": ("int", 5, 20),
     "adx_threshold": ("float", 15.0, 35.0),
     "sl_mult": ("float", 1.0, 3.0),
     "rr": ("float", 1.0, 3.0),
@@ -54,6 +58,13 @@ PARAM_SPACE = {
 
 # Metricas de summarize que suponen un sl/tp escalar (no aplican si cambian por regimen).
 SCALAR_EXIT_METRICS = ["p_star", "p_star_cost", "k_mean"]
+
+def macd_windows(macd_slow: int) -> tuple[int, int, int]:
+    """Ventanas (rapida, lenta, señal) del MACD con las proporciones clasicas 12/26/9.
+
+    Ejemplo: macd_slow = 26 -> (12, 26, 9); macd_slow = 52 -> (24, 52, 18).
+    """
+    return max(2, round(macd_slow * 12 / 26)), macd_slow, max(2, round(macd_slow * 9 / 26))
 
 
 def theta_signal(df: pd.DataFrame, theta: dict) -> tuple[pd.Series, pd.Series]:
@@ -64,8 +75,9 @@ def theta_signal(df: pd.DataFrame, theta: dict) -> tuple[pd.Series, pd.Series]:
     tuple[pd.Series, pd.Series]
         (señal 1/-1/0 por barra, ATR(14) por barra).
     """
+    macd_fast, macd_slow, macd_signal = macd_windows(int(theta["macd_slow"]))
     features = compute_features(df, roc_window=int(theta["roc_window"]),
-                                cmf_window=int(theta["cmf_window"]),
+                                macd_fast=macd_fast, macd_slow=macd_slow, macd_signal=macd_signal,
                                 adx_threshold=theta["adx_threshold"])
     return features["signal"], features["atr_14"]
 
