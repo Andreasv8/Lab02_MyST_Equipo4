@@ -10,8 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data import load_train
-from src.optimize import (REGIME_NAMES, STUDIES, crisis_entries, empty_inputs, fill_inputs,
-                          make_windows, optimize_window, select_params)
+from src.backtest import BacktestResult
+from src.optimize import (REGIME_NAMES, STUDIES, crisis_entries, degradation_table, empty_inputs,
+                          fill_inputs, make_windows, optimize_window, select_params, theta_final)
 
 DF = load_train()
 WINDOWS = make_windows(DF.index)
@@ -117,3 +118,72 @@ def test_force_exit_only_when_regime_changes_to_crisis():
     """force_exit es True solo en la barra donde el regimen pasa a crisis (tambien despues de NaN)."""
     labels = pd.Series(["trend", "crisis", "crisis", "mean_reversion", "crisis", np.nan, "crisis"])
     assert crisis_entries(labels).tolist() == [False, True, False, False, True, False, True]
+
+
+# --- θ_final (SPEC seccion 13) ------------------------------------------------
+
+def _search_theta(**changes) -> dict:
+    """θ del espacio de busqueda con valores base y algunos cambios."""
+    base = {"ema_fast": 10, "slow_ratio": 3.0, "roc_window": 12, "bb_window": 20, "bb_threshold": 0.7,
+            "adx_threshold": 20.0, "sl_mult": 2.0, "rr": 3.0, "max_holding": 1000, "rho": 0.01}
+    return {**base, **changes}
+
+
+def _result(number: int, best: dict) -> dict:
+    return {"number": number, "best": best}
+
+
+def test_theta_final_median_rounding_and_ema_slow():
+    """Mediana por parametro; enteros con .5 hacia arriba; ema_slow recalculada; sin trial valido no cuenta.
+
+    global: ema_fast [10, 13] -> 11.5 -> 12; slow_ratio [3, 4] -> 3.5; ema_slow = round(12·3.5) = 42.
+    rr [3, 5] -> 4. La tercera ventana no tiene trial global valido y no entra en la mediana.
+    """
+    g1 = {"params": _search_theta(ema_fast=10, slow_ratio=3.0, rr=3.0)}
+    g2 = {"params": _search_theta(ema_fast=13, slow_ratio=4.0, rr=5.0)}
+    empty = {name: None for name in STUDIES}
+    results = [_result(0, {**empty, "global": g1}), _result(1, {**empty, "global": g2}),
+               _result(2, empty)]
+
+    final = theta_final(results)
+
+    theta = final["global"]
+    assert theta["ema_fast"] == 12
+    assert theta["slow_ratio"] == pytest.approx(3.5)
+    assert theta["ema_slow"] == 42
+    assert theta["rr"] == pytest.approx(4.0)
+    assert (theta["bb_std"], theta["adx_window"], theta["atr_window"]) == (2, 14, 14)
+    assert all(final[name] is None for name in REGIME_NAMES)
+
+
+def test_theta_final_ema_slow_at_least_fast_plus_one():
+    """Si round(ema_fast · slow_ratio) <= ema_fast, se usa ema_fast + 1."""
+    empty = {name: None for name in STUDIES}
+    best = {"params": _search_theta(ema_fast=5, slow_ratio=1.0)}
+    final = theta_final([_result(0, {**empty, "global": best})])
+    assert final["global"]["ema_slow"] == 6
+
+
+# --- Degradacion train -> OOS ---------------------------------------------------
+
+def test_degradation_weekly_return_comparison_by_hand():
+    """Una ventana de 4 semanas de train con +8% (2% por semana) y una semana OOS de +1%.
+
+    Proporcion que sobrevive en retorno semanal = 1% / 2% = 0.5.
+    """
+    train_start, test_start = pd.Timestamp("2023-01-01"), pd.Timestamp("2023-01-29")
+    best = {"params": {}, "calmar": 4.0, "n_trades": 6, "total_return": 0.08}
+    result = {"number": 0, "train_start": train_start, "train_end": test_start,
+              "test_start": test_start, "test_end": test_start + pd.Timedelta(days=7),
+              "best": {"global": best}}
+    index = pd.date_range(test_start, periods=3, freq="3D")
+    equity = pd.DataFrame({"equity": [100.0, 100.5, 101.0], "shares": 0.0}, index=index)
+    oos = {"curva": BacktestResult(equity=equity, trades=pd.DataFrame(columns=["pnl"]))}
+
+    table, summary = degradation_table([result], oos)
+
+    assert table.loc[0, "weekly_return_train"] == pytest.approx(0.02)
+    assert table.loc[0, "weekly_return_oos_curva"] == pytest.approx(0.01)
+    weekly = summary[summary["comparison"] == "weekly_return"].iloc[0]
+    assert weekly["share_survives"] == pytest.approx(0.5)
+    assert set(summary["comparison"]) == {"calmar", "weekly_return"}
