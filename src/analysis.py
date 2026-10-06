@@ -11,10 +11,10 @@ from typing import Iterable, Optional
 import numpy as np
 import pandas as pd
 
-from src.backtest import BacktestConfig, backtest
+from src.backtest import BacktestConfig, backtest, compute_win_rate
 from src.metrics import summarize
+from src.signals import compute_features
 from src.splits import SPLITS
-from src.strategy import compute_features, compute_win_rate
 
 DEFAULT_PERIODS = {"train": SPLITS["train"], "test": SPLITS["test"]}
 

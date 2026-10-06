@@ -7,6 +7,8 @@ hasta t (ver tests/test_truncation.py).
 import numpy as np
 import pandas as pd
 
+from src.data import align_to_base, resample_ohlc
+
 
 def sma(series: pd.Series, window: int) -> pd.Series:
     """Media movil simple sobre una serie."""
@@ -301,3 +303,160 @@ def build_stationary_indicators(df: pd.DataFrame) -> pd.DataFrame:
     })
 
     return indicators.dropna()
+
+
+# Umbral de Wilder para considerar que el mercado esta en tendencia.
+ADX_THRESHOLD = 25
+# Lab 02, seccion 3.1: al menos 2 de los 3 indicadores deben coincidir en direccion.
+MIN_VOTES = 2
+VOTE_COLUMNS = ["vote_roc", "vote_macd", "vote_adx"]
+
+
+def indicator_votes(roc_values: pd.Series, macd_hist: pd.Series, plus_di: pd.Series,
+                    minus_di: pd.Series, adx_values: pd.Series,
+                    adx_threshold: float = ADX_THRESHOLD) -> pd.DataFrame:
+    """Voto de cada indicador en cada barra: +1 (largo), -1 (corto) o 0 (no vota).
+
+    vote_roc  = signo(ROC)                          momento
+    vote_macd = signo(MACD - señal)                 tendencia
+    vote_adx  = signo(+DI - -DI) si ADX > umbral    tendencia; 0 si ADX <= umbral
+
+    Los NaN del warm-up y los valores exactamente 0 no votan.
+    """
+    def _sign(values: pd.Series) -> pd.Series:
+        return (values > 0).astype(int) - (values < 0).astype(int)
+
+    return pd.DataFrame({
+        "vote_roc": _sign(roc_values),
+        "vote_macd": _sign(macd_hist),
+        "vote_adx": _sign(plus_di - minus_di).where(adx_values > adx_threshold, 0),
+    }, index=roc_values.index).astype(int)
+
+
+def confirmation_signal(votes: pd.DataFrame, min_votes: int = MIN_VOTES) -> pd.Series:
+    """Regla de confirmacion 2 de 3 (Lab 02, seccion 3.2).
+
+    L_t = indicadores con voto +1;  S_t = indicadores con voto -1
+    señal_t = +1 si L_t >= 2;  -1 si S_t >= 2;  0 en otro caso.
+    Con un solo indicador a favor NO se abre posicion.
+    """
+    n_long = (votes == 1).sum(axis=1)
+    n_short = (votes == -1).sum(axis=1)
+    signal = pd.Series(0, index=votes.index, dtype=int)
+    signal.loc[n_long >= min_votes] = 1
+    signal.loc[n_short >= min_votes] = -1
+    return signal
+
+
+def compute_features(df: pd.DataFrame, roc_window: int = 10, macd_fast: int = 12,
+                     macd_slow: int = 26, macd_signal: int = 9, adx_window: int = 14,
+                     adx_threshold: float = ADX_THRESHOLD) -> pd.DataFrame:
+    """Calcula los tres indicadores, sus votos y la señal de confirmacion 2 de 3.
+
+    Indicadores: ROC (momento), MACD (tendencia) y ADX con +DI/-DI (tendencia).
+    Ninguno usa volumen: en los datos de BTC falta en ~46% de las barras.
+    """
+    close, high, low = df["Close"], df["High"], df["Low"]
+
+    roc_values = roc(close, roc_window)
+    macd_hist = macd_histogram(close, macd_fast, macd_slow, macd_signal)
+    plus_di, minus_di = directional_indicators(high, low, close, adx_window)
+    adx_values = adx(high, low, close, adx_window)
+    votes = indicator_votes(roc_values, macd_hist, plus_di, minus_di, adx_values, adx_threshold)
+
+    return pd.DataFrame({
+        "roc": roc_values,
+        "macd_hist": macd_hist,
+        "plus_di": plus_di,
+        "minus_di": minus_di,
+        "adx": adx_values,
+        "atr_14": atr(high, low, close, 14),
+        **{col: votes[col] for col in VOTE_COLUMNS},
+        "n_long": (votes == 1).sum(axis=1),
+        "n_short": (votes == -1).sum(axis=1),
+        "signal": confirmation_signal(votes),
+    })
+
+
+def ema_adx_signal(ema_fast: pd.Series, ema_slow: pd.Series, adx_values: pd.Series,
+                   adx_threshold: float = ADX_THRESHOLD) -> pd.Series:
+    """Señal de la estrategia EMA + ADX (estrategia 2).
+
+    señal_t = +1 si EMA_rapida > EMA_lenta y ADX > umbral   (tendencia alcista)
+    señal_t = -1 si EMA_rapida < EMA_lenta y ADX > umbral   (tendencia bajista)
+    señal_t =  0 en otro caso (ADX debil, EMAs iguales o NaN de warm-up)
+    """
+    trend = (ema_fast > ema_slow).astype(int) - (ema_fast < ema_slow).astype(int)
+    return trend.where(adx_values > adx_threshold, 0).astype(int)
+
+
+def compute_ema_adx_features(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 50,
+                             adx_window: int = 14, adx_threshold: float = ADX_THRESHOLD,
+                             atr_window: int = 14, timeframe: str = "1h",
+                             entry_on_change: bool = True) -> pd.DataFrame:
+    """Indicadores y señal EMA + ADX calculados en un timeframe mayor y llevados a 5 min.
+
+    Las barras de 5 minutos son muy ruidosas (efficiency ratio ~ random walk),
+    asi que EMAs, ADX y ATR se calculan sobre barras agregadas de `timeframe`
+    y se alinean sin look-ahead al indice de 5 minutos (ver align_to_base).
+    La ejecucion (entrada, SL/TP, holding) sigue ocurriendo en 5 minutos.
+
+    Parametros
+    ----------
+    df : pd.DataFrame
+        OHLC de 5 minutos con indice de fechas.
+    ema_fast, ema_slow : int
+        Spans de las EMAs, en barras de `timeframe`.
+    adx_window, atr_window : int
+        Ventanas de ADX y ATR, en barras de `timeframe`.
+    adx_threshold : float
+        Umbral de fuerza de tendencia.
+    timeframe : str
+        Regla de pandas para agregar ("1h", "4h", ...).
+    entry_on_change : bool
+        True: signal solo vale +-1 en la barra de 5 minutos donde la
+        tendencia cambia (evento), y 0 mientras se mantiene. Evita reentrar
+        en la barra siguiente a cada SL/TP dentro de la misma tendencia,
+        que en train era el 85% de los trades y pagaba 0.35% cada vez.
+        False: signal = tendencia (estado) en cada barra.
+
+    Regresa
+    -------
+    pd.DataFrame
+        ema_fast, ema_slow, adx, atr, trend (estado) y signal, con el mismo
+        indice que df.
+    """
+    htf = resample_ohlc(df, timeframe)
+    high, low, close = htf["High"], htf["Low"], htf["Close"]
+    features = pd.DataFrame({
+        "ema_fast": ema(close, ema_fast),
+        "ema_slow": ema(close, ema_slow),
+        "adx": adx(high, low, close, adx_window),
+        "atr": atr(high, low, close, atr_window),
+    })
+    # Sin señal hasta que la EMA lenta tenga historia suficiente (warm-up).
+    features.loc[features.index[:ema_slow - 1], ["ema_fast", "ema_slow"]] = float("nan")
+    features["signal"] = ema_adx_signal(features["ema_fast"], features["ema_slow"],
+                                        features["adx"], adx_threshold)
+    aligned = align_to_base(features, df.index, timeframe)
+    aligned["trend"] = aligned.pop("signal").fillna(0).astype(int)
+    trend = aligned["trend"]
+    aligned["signal"] = trend.where(trend != trend.shift(1), 0) if entry_on_change else trend
+    return aligned
+
+
+def compute_entry_signal(df: pd.DataFrame) -> pd.Series:
+    """Señal de entrada por barra con la regla de confluencia (docs/SPEC.md, seccion 3).
+
+    Parametros
+    ----------
+    df : pd.DataFrame
+        Debe incluir columnas "Close", "High", "Low", "Volume".
+
+    Regresa
+    -------
+    pd.Series
+        Señal por barra: 1 (long), -1 (short) o 0 (flat).
+    """
+    return compute_features(df)["signal"]
+

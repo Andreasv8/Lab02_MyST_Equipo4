@@ -12,7 +12,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from src.strategy import compute_win_rate
+from src.backtest import compute_win_rate
 
 BARS_PER_DAY = 288                      # 24 h x 12 barras de 5 minutos
 PERIODS_PER_YEAR = BARS_PER_DAY * 365
@@ -198,7 +198,7 @@ def turnover_stats(equity: pd.Series, trades: pd.DataFrame, cost_rate: float,
 
 
 def win_rate_stats(trades: pd.DataFrame, sl_mult: float, tp_mult: float, cost_rate: float) -> dict:
-    """Win rate empirico vs break-even teorico, sin y con costos (SPEC.md, break-even).
+    """Win rate empirico vs break-even teorico, sin y con costos (docs/SPEC.md, break-even).
 
     empirico = fraccion de trades con pnl neto > 0
     r = tp_mult / sl_mult;  p* = 1 / (1 + r)

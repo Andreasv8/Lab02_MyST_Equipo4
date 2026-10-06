@@ -7,22 +7,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import src.strategy as strategy
-from src.strategy import (
-    ADX_THRESHOLD,
+import src.backtest as backtest_module
+from src.backtest import (
     BORROW_DAY_COUNT,
     BORROW_FEE_ANNUAL,
     TOTAL_COST_RATE,
     Position,
     compute_borrow_fee,
-    compute_features,
     compute_sizing,
     compute_win_rate,
     resolve_exit,
     run_backtest,
 )
+from src.signals import ADX_THRESHOLD, compute_features
 
-# Orden cronologico de los eventos dentro de una barra (SPEC.md, seccion 7).
+# Orden cronologico de los eventos dentro de una barra (docs/SPEC.md, seccion 7).
 PHASE_ORDER = {"open": 0, "intrabar": 1, "close": 2}
 
 
@@ -104,7 +103,7 @@ def _patch_features(monkeypatch, signal: list[int], atr_value: float = 2.0) -> N
     def fake_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame({"signal": signal, "atr_14": atr_value}, index=df.index)
 
-    monkeypatch.setattr(strategy, "compute_features", fake_features)
+    monkeypatch.setattr(backtest_module, "compute_features", fake_features)
 
 
 def test_no_reentry_in_same_bar_after_intrabar_exit(monkeypatch):

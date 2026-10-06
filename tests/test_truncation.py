@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest import BacktestConfig, backtest
 from src.data import load_btc
-from src.strategy import compute_features
+from src.signals import compute_features
 
 DF = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")).iloc[:5000]
 
