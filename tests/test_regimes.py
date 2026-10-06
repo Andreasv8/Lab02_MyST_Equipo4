@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data import load_btc
 from src.regimes import (
+    FIT_END,
+    FIT_START,
     WINDOW,
     hourly,
     REGIME_COLUMNS,
@@ -40,9 +42,9 @@ from src.regimes import (
     regime_shares,
     regime_silhouette,
     regime_validation,
+    rule_regimes,
     viterbi_lookahead_check,
 )
-from src.splits import get_split
 
 DF = load_btc(str(Path(__file__).resolve().parents[1] / "data" / "btc_project_train.csv")).iloc[:30_000]
 
@@ -119,7 +121,7 @@ def test_kmeans_names_stable_across_seeds():
     que difieren en unos pocos puntos frontera; se exige >= 99% de coincidencia.
     Si los nombres dependieran del ID, la coincidencia caeria muy por debajo.
     """
-    train = hourly(get_split(FULL_FEATURES, "train"))
+    train = hourly(FULL_FEATURES.loc[FIT_START:FIT_END])
     labels = []
     for seed in (42, 7):
         model, names = fit_kmeans(train, MODELS.scaler, random_state=seed)
@@ -178,7 +180,7 @@ def test_canary_viterbi_has_lookahead():
 
 def test_hmm_seed_scan_best_matches_final_model():
     """El mejor log-likelihood del barrido de semillas es el del HMM elegido cuando la opcion es full."""
-    train = hourly(get_split(FULL_FEATURES, "train"))
+    train = hourly(FULL_FEATURES.loc[FIT_START:FIT_END])
     scan = hmm_seed_scan(train, MODELS.scaler, seeds=range(10))
     x_train = apply_scaler(train.dropna(), MODELS.scaler).to_numpy()
     assert MODELS.hmm_choice in ("full", "diag", "diag+prior")
@@ -277,3 +279,27 @@ def test_regime_validation_matches_comparison_table():
     np.testing.assert_allclose(table["silhouette"], expected["silhouette"])
     assert (table["duration_ok"] == (table["mean_duration_hours"] > 12)).all()
     assert (table["silhouette_ok"] == (table["silhouette"] > 0.4)).all()
+
+
+def test_rule_regimes_ignore_data_after_fit_end():
+    """Con ventana expansiva, cambiar los precios despues de fit_end no cambia el umbral
+    ni las etiquetas hasta fit_end (el ajuste no ve el futuro)."""
+    fit_end = "2022-08-31"
+    labels, threshold = rule_regimes(DF, fit_end)
+
+    corrupted = DF.copy()
+    after = corrupted.index > corrupted.loc[:fit_end].index[-1]
+    corrupted.loc[after, "Close"] *= np.linspace(0.5, 2.0, after.sum())
+    labels_corrupted, threshold_corrupted = rule_regimes(corrupted, fit_end)
+
+    assert threshold_corrupted == threshold
+    pd.testing.assert_series_equal(labels.loc[:fit_end], labels_corrupted.loc[:fit_end])
+    # La corrupcion si cambia algo despues de fit_end (la prueba no es trivial).
+    assert not labels.loc[fit_end:].equals(labels_corrupted.loc[fit_end:])
+
+
+def test_rule_regimes_threshold_uses_data_up_to_fit_end():
+    """El umbral es el p90 de la volatilidad horaria desde el inicio de df hasta fit_end."""
+    fit_end = "2022-08-31"
+    _, threshold = rule_regimes(DF, fit_end)
+    assert threshold == pytest.approx(HOURLY_FEATURES.loc[:fit_end, "volatility"].quantile(0.9))

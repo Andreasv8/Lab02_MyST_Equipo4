@@ -120,3 +120,69 @@ def test_accounting_identities_with_lab_costs():
     assert (equity["cash"] >= -1e-9).all()
 
     
+
+def _golden():
+    """Escenario golden: precios, señal y ATR (= 2 en todas las barras)."""
+    scenario = pd.read_csv(GOLDEN_DIR / "backtest_scenario.csv", index_col="Date", parse_dates=True)
+    return scenario[["Open", "High", "Low", "Close"]], scenario["signal"], scenario["atr"]
+
+
+LAB_CONFIG = BacktestConfig(initial_cash=10_000, rho=0.01, sl_mult=2, tp_mult=3, max_holding=10,
+                            commission_rate=COMMISSION_RATE, slippage_rate=0.0, borrow_fee_annual=0.0)
+
+
+def test_position_keeps_entry_params_r1():
+    """Regla R1: la posicion conserva el SL, el TP y el holding maximo con los que entro.
+
+    Los parametros por barra cambian justo despues de la barra de señal (t=0):
+    sl_mult 2 -> 0.1, tp_mult 3 -> 0.1 y max_holding 10 -> 1. Si el motor usara
+    los nuevos, el long saldria en t=1 (SL 99.8 o holding 1). Con R1 el SL
+    queda en 96 y el TP en 106, asi que sale en t=2 por take-profit a 106.
+    """
+    df, signal, atr = _golden()
+    sl = pd.Series([2.0, 0.1, 0.1, 0.1, 0.1], index=df.index)
+    tp = pd.Series([3.0, 0.1, 0.1, 0.1, 0.1], index=df.index)
+    hold = pd.Series([10, 1, 1, 1, 1], index=df.index)
+
+    first = backtest(df, signal, atr, LAB_CONFIG, sl_mult=sl, tp_mult=tp, max_holding=hold).trades.iloc[0]
+
+    assert (first["side"], first["entry_bar"], first["exit_bar"]) == ("long", 1, 2)
+    assert first["exit_reason"] == "take_profit"
+    assert first["raw_exit_price"] == pytest.approx(106.0)
+    assert first["shares"] == pytest.approx(0.01 * 10_000 / (2 * 2))   # sizing con el sl de la entrada
+
+
+def test_force_exit_closes_at_next_open_with_commission():
+    """force_exit en t-1 con posicion abierta: sale al open de t ("regime_exit") y paga comision."""
+    df, signal, atr = _golden()
+    force_exit = pd.Series([False, True, False, False, False], index=df.index)
+
+    first = backtest(df, signal, atr, LAB_CONFIG, force_exit=force_exit).trades.iloc[0]
+
+    assert (first["side"], first["entry_bar"], first["exit_bar"]) == ("long", 1, 2)
+    assert (first["exit_reason"], first["exit_phase"]) == ("regime_exit", "open")
+    assert first["raw_exit_price"] == df["Open"].iloc[2]
+    assert first["exit_commission"] == pytest.approx(COMMISSION_RATE * df["Open"].iloc[2] * first["shares"])
+
+
+def _same_result(a, b) -> None:
+    """Dos resultados del motor son identicos (equity y trades)."""
+    pd.testing.assert_frame_equal(a.equity, b.equity)
+    pd.testing.assert_frame_equal(a.trades, b.trades)
+
+
+def test_force_exit_without_position_does_nothing():
+    """force_exit cuando no hay posicion abierta no cambia nada."""
+    df, signal, atr = _golden()
+    # En t=0 aun no hay posicion; t=4 es la ultima barra (no hay t+1 donde ejecutar).
+    force_exit = pd.Series([True, False, False, False, True], index=df.index)
+    _same_result(backtest(df, signal, atr, LAB_CONFIG, force_exit=force_exit),
+                 backtest(df, signal, atr, LAB_CONFIG))
+
+
+def test_force_exit_none_matches_all_false():
+    """force_exit=None da el mismo resultado que nunca forzar la salida."""
+    df, signal, atr = _golden()
+    never = pd.Series(False, index=df.index)
+    _same_result(backtest(df, signal, atr, LAB_CONFIG, force_exit=None),
+                 backtest(df, signal, atr, LAB_CONFIG, force_exit=never))

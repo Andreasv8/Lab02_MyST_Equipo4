@@ -63,35 +63,23 @@ python -m pytest -q
 │   └── analysis.ipynb
 ├── src/
 │   ├── __init__.py
-│   ├── analysis.py
 │   ├── backtest.py
 │   ├── data.py
-│   ├── ema_search.py
 │   ├── metrics.py
-│   ├── optimization.py
 │   ├── plots.py
 │   ├── regimes.py
-│   ├── robust_evaluation.py
-│   ├── signals.py
-│   ├── splits.py
-│   └── walk_forward.py
+│   └── signals.py
 └── tests/
     ├── golden/
     │   └── backtest_scenario.csv
     ├── test_accounting.py
-    ├── test_analysis.py
     ├── test_backtest.py
     ├── test_causality.py
     ├── test_confirmation.py
-    ├── test_ema_adx.py
+    ├── test_data.py
     ├── test_execution.py
     ├── test_metrics.py
-    ├── test_optimization.py
-    ├── test_regimes.py
-    ├── test_robust_evaluation.py
-    ├── test_signals.py
-    ├── test_truncation.py
-    └── test_walk_forward.py
+    └── test_regimes.py
 ```
 
 ## Uso de herramientas de IA

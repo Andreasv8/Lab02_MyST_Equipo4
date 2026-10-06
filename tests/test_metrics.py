@@ -8,11 +8,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest import BacktestConfig
+from src.data import load_train
 from src.metrics import (
     PERIODS_PER_YEAR,
+    break_even_cost,
     buy_and_hold_equity,
     cagr,
     calmar_ratio,
+    cost_sensitivity,
     drawdown_series,
     exposure,
     max_drawdown,
@@ -24,6 +27,7 @@ from src.metrics import (
     turnover_stats,
     win_rate_stats,
 )
+from src.signals import THETA0
 
 PPY = PERIODS_PER_YEAR
 SQRT_PPY = math.sqrt(PPY)
@@ -158,3 +162,28 @@ def test_summarize_sub_period_rebases_and_filters_trades():
     assert summary["avg_pnl"] == pytest.approx(8.0)
     assert summary["exposure"] == pytest.approx(2 / 3)
     assert summary["turnover_annual"] == pytest.approx(2 * 105 / ((100 + 110 + 99) / 3) / (2 / PPY))
+
+
+def test_break_even_interpolates_first_zero_crossing():
+    """Sharpe [1, 0.5, -0.5] en [0, 5, 10] bps: cruza entre 5 y 10 -> 5 + 0.5·5/1 = 7.5 bps."""
+    assert break_even_cost([0, 5, 10], [1.0, 0.5, -0.5]) == pytest.approx(7.5)
+    assert math.isnan(break_even_cost([0, 5, 10], [1.0, 0.8, 0.6]))
+    assert math.isnan(break_even_cost([0, 5, 10], [-0.2, -0.4, -0.6]))
+
+
+def test_cost_sensitivity_grid_and_costs_hurt():
+    """11 costos (0-50 bps); la equity final a 50 bps no supera la de 0 bps; no modifica df.
+
+    Usa ~104 dias reales de train: la estrategia necesita velas de 4h para calentar.
+    """
+    df = load_train().iloc[:30_000]
+    df_before = df.copy()
+    periods = {"a": ("2022-06-01", "2022-07-31"), "b": ("2022-08-01", "2022-09-13")}
+
+    sensitivity = cost_sensitivity(df, THETA0, periods)
+
+    assert sensitivity.index.tolist() == list(range(0, 55, 5))
+    assert list(sensitivity.columns) == ["sharpe_a", "equity_final_a", "sharpe_b", "equity_final_b"]
+    for period in ["a", "b"]:
+        assert sensitivity.loc[50, f"equity_final_{period}"] <= sensitivity.loc[0, f"equity_final_{period}"]
+    pd.testing.assert_frame_equal(df, df_before)

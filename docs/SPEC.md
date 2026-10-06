@@ -93,7 +93,7 @@ unidades se recortan a lo que alcanza con el capital (`compute_sizing` en `src/b
 
 - **Comisión:** 0.125% por lado, en cada apertura y en cada cierre, sobre el nocional (precio · unidades).
 - **Slippage:** 0 en el escenario base. El efecto de costos más altos se mide con la curva de retorno
-  neto contra nivel de costo (`cost_sensitivity` en `src/analysis.py`).
+  neto contra nivel de costo (`cost_sensitivity` en `src/metrics.py`).
 - **Borrow fee:** 0 (no se cobra por los cortos).
 
 Cada trade guarda `entry_commission` y `exit_commission` en dólares (y `entry_slippage`,
@@ -140,3 +140,64 @@ salvo `max_holding`, que está en barras de 5 min.
 
 - Capital inicial: 1,000,000.
 - Se opera en los dos lados: posiciones largas y cortas. Nunca hay dos posiciones abiertas a la vez.
+
+## 10. Detección de régimen
+
+**Método: reglas** (`rule_regimes` en `src/regimes.py`). K-means y HMM se calculan solo para comparar.
+
+Variables, en una ventana móvil de 1 semana de barras de 5 min (causales: en t solo usan datos hasta t):
+
+- **volatilidad**: desviación estándar de los log-rendimientos, anualizada;
+- **trend_r2**: R² de una recta ajustada al log-precio (qué tan "en línea recta" se mueve);
+- **autocorrelación** de los rendimientos a 1 barra.
+
+El régimen se actualiza **cada hora** (en las barras hh:00) y se mantiene el resto de la hora:
+
+1. **crisis** si la volatilidad pasa del percentil 90 de la volatilidad de ajuste;
+2. **trend** si no es crisis y trend_r2 > 0.5;
+3. **mean_reversion** en otro caso.
+
+El umbral de crisis se ajusta con **ventana expansiva**: en cada ventana del walk-forward se usa toda la
+historia desde el inicio de los datos hasta el final del ajuste, nunca datos posteriores.
+
+**Por qué reglas y no K-means/HMM.** Validación medida con ajuste del 2022-06-01 al 2023-05-14 y fuera de
+muestra del 2023-05-15 al 2023-12-31 (dentro del archivo de train):
+
+| Método | Periodo | Duración media (h) | Transiciones/mes | Silhouette | % crisis | % trend | % mean_rev |
+|--------|---------|-------------------:|-----------------:|-----------:|---------:|--------:|-----------:|
+| Reglas | ajuste | 89.8 | 7.9 | 0.31 | 10.0 | 36.9 | 53.1 |
+| Reglas | fuera de muestra | 101.0 | 7.0 | 0.37 | 3.0 | 31.4 | 65.6 |
+| K-means | ajuste | 88.8 | 8.0 | 0.32 | 28.5 | 35.1 | 36.4 |
+| K-means | fuera de muestra | 95.7 | 7.4 | 0.21 | 70.4 | 13.0 | 16.6 |
+| HMM | ajuste | 102.5 | 6.9 | 0.31 | 26.3 | 40.9 | 32.8 |
+| HMM | fuera de muestra | 175.9 | 4.0 | 0.20 | 82.5 | 9.4 | 8.1 |
+
+- Los tres métodos cumplen la duración mínima (> 12 h) y cambian de régimen pocas veces al mes.
+- Fuera de muestra, K-means y HMM clasifican entre el 70% y el 82% del tiempo como "crisis", aunque la
+  volatilidad de ese grupo ya es casi igual a la de "trend". Los nombres dejan de tener sentido: es
+  sobreajuste a la forma de los datos de ajuste (sobre todo a la autocorrelación, que fuera de muestra
+  se volvió negativa).
+- Las reglas mantienen el orden de los nombres fuera de muestra (crisis sigue siendo lo más volátil) y su
+  silhouette incluso mejora un poco.
+
+**Silhouette < 0.4 en los tres métodos.** No se llega al objetivo de 0.4. La razón es que BTC no salta
+de un régimen a otro: cambia de forma **gradual**, así que muchas horas quedan en la frontera entre dos
+regímenes y los grupos se traslapan. Lo tomamos en cuenta: el régimen se usa para ajustar parámetros y
+para salir en crisis, no como una clasificación perfecta.
+
+## 11. Reglas de transición
+
+Qué pasa con las posiciones cuando cambia el régimen:
+
+- **R1.** Una posición conserva el SL, el TP y el holding máximo con los que entró, aunque después
+  cambie el régimen.
+- **R2.** Las entradas nuevas usan los parámetros del régimen vigente en la barra de señal (t) y se
+  ejecutan en t+1.
+- **R3.** Si el régimen cambia a crisis, la posición abierta se cierra en el open de la siguiente barra
+  (`force_exit` en `backtest`, motivo `regime_exit`, paga comisión). Igual que la señal: se decide en t
+  y se ejecuta en t+1, sin look-ahead.
+- **R4.** Entre tendencia y reversión la posición se mantiene hasta su SL, TP, holding máximo o señal
+  contraria.
+- **R5.** Si en una ventana de entrenamiento del walk-forward un régimen no llega al mínimo de
+  operaciones, ese régimen usa los parámetros globales de esa ventana (así no se optimiza con
+  muy pocos datos).

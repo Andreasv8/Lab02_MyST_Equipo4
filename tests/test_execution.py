@@ -19,7 +19,10 @@ from src.backtest import (
     resolve_exit,
     run_backtest,
 )
-from src.signals import ADX_THRESHOLD, compute_features
+from src.signals import THETA0
+
+# Parametros de estas pruebas: sl 2, tp = rr · sl = 3 y holding maximo 10, como en los calculos a mano.
+PARAMS = {**THETA0, "sl_mult": 2.0, "rr": 1.5, "max_holding": 10, "rho": 0.01}
 
 # Orden cronologico de los eventos dentro de una barra (docs/SPEC.md, seccion 7).
 PHASE_ORDER = {"open": 0, "intrabar": 1, "close": 2}
@@ -62,8 +65,11 @@ def test_sizing_matches_risk_budget():
     assert risk_in_dollars == rho * capital
 
 
-def test_no_simultaneous_positions():
-    """La maquina de estados nunca debe mantener dos posiciones abiertas al mismo tiempo."""
+def test_no_simultaneous_positions(monkeypatch):
+    """La maquina de estados nunca debe mantener dos posiciones abiertas al mismo tiempo.
+
+    Precios y señal aleatorios (semilla 42): muchas entradas, salidas y cambios de lado.
+    """
     rng = np.random.default_rng(42)
     n = 150
     dates = pd.date_range("2024-01-01", periods=n, freq="B")
@@ -76,7 +82,8 @@ def test_no_simultaneous_positions():
 
     df = pd.DataFrame({"Open": open_, "High": high, "Low": low, "Close": close, "Volume": volume})
 
-    trades = run_backtest(df, capital=100_000.0)
+    _patch_features(monkeypatch, rng.choice([-1, 0, 0, 1], size=n).tolist())
+    trades = run_backtest(df, PARAMS, capital=100_000.0)
 
     assert len(trades) > 0
 
@@ -99,11 +106,11 @@ def _bars(rows: list[tuple[float, float, float, float]]) -> pd.DataFrame:
 
 
 def _patch_features(monkeypatch, signal: list[int], atr_value: float = 2.0) -> None:
-    """Sustituye el pipeline de indicadores por una señal y un ATR fijos."""
-    def fake_features(df: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame({"signal": signal, "atr_14": atr_value}, index=df.index)
+    """Sustituye la estrategia por una señal y un ATR fijos."""
+    def fake_strategy(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+        return pd.DataFrame({"signal": signal, "atr": atr_value}, index=df.index)
 
-    monkeypatch.setattr(backtest_module, "compute_features", fake_features)
+    monkeypatch.setattr(backtest_module, "compute_strategy", fake_strategy)
 
 
 def test_no_reentry_in_same_bar_after_intrabar_exit(monkeypatch):
@@ -117,7 +124,7 @@ def test_no_reentry_in_same_bar_after_intrabar_exit(monkeypatch):
     ])
     _patch_features(monkeypatch, [1, 1, 1, 0, 0])
 
-    trades = run_backtest(df, capital=10_000.0, max_holding=10)
+    trades = run_backtest(df, PARAMS, capital=10_000.0)
 
     assert trades[0]["exit_bar"] == 2
     assert trades[0]["exit_reason"] == "take_profit"
@@ -134,7 +141,7 @@ def test_gap_through_stop_fills_at_open(monkeypatch):
     ])
     _patch_features(monkeypatch, [1, 0, 0])
 
-    trades = run_backtest(df, capital=10_000.0)
+    trades = run_backtest(df, PARAMS, capital=10_000.0)
 
     assert trades[0]["exit_reason"] == "stop_loss"
     assert trades[0]["exit_phase"] == "open"
@@ -151,7 +158,7 @@ def test_opposite_signal_closes_at_open_before_intrabar_checks(monkeypatch):
     ])
     _patch_features(monkeypatch, [1, -1, 0, 0])
 
-    trades = run_backtest(df, capital=10_000.0)
+    trades = run_backtest(df, PARAMS, capital=10_000.0)
 
     assert trades[0]["side"] == "long"
     assert trades[0]["exit_reason"] == "opposite_signal"
@@ -165,7 +172,7 @@ def test_max_holding_closes_on_tenth_bar(monkeypatch):
     rows = [(100, 101, 99, 100)] * 15
     _patch_features(monkeypatch, [1] + [0] * 14)
 
-    trades = run_backtest(_bars(rows), capital=10_000.0)
+    trades = run_backtest(_bars(rows), PARAMS, capital=10_000.0)
 
     assert trades[0]["entry_bar"] == 1
     assert trades[0]["exit_bar"] == 10
@@ -208,7 +215,7 @@ def test_short_pays_borrow_fee_by_calendar_days(monkeypatch):
     ])
     _patch_features(monkeypatch, [0, 0, 0, -1, 1, 0])
 
-    trades = run_backtest(df, capital=10_000.0)
+    trades = run_backtest(df, PARAMS, capital=10_000.0)
     short = trades[0]
 
     assert short["side"] == "short"
@@ -229,7 +236,7 @@ def test_same_day_short_pays_no_borrow(monkeypatch):
     ])
     _patch_features(monkeypatch, [-1, 0])
 
-    trades = run_backtest(df, capital=10_000.0)
+    trades = run_backtest(df, PARAMS, capital=10_000.0)
 
     assert trades[0]["exit_reason"] == "stop_loss"
     assert trades[0]["exit_bar"] == trades[0]["entry_bar"]

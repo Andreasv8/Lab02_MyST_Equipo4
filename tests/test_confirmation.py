@@ -9,7 +9,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.signals import confirmed_state, entry_signal, strategy_votes
+from src.signals import (MIN_VOTES, confirmation_signal, confirmed_state, entry_signal,
+                         strategy_votes)
 
 ADX_THRESHOLD = 20
 
@@ -61,3 +62,23 @@ def test_bollinger_vote_uses_threshold():
     votes = strategy_votes(zeros, zeros, zeros, percent_b, bb_threshold=0.7)
     assert votes["vote_bb"].tolist() == [1, -1, 0, 0, 0]
     assert (votes["vote_ema"] == 0).all() and (votes["vote_roc"] == 0).all()
+
+
+@pytest.mark.parametrize("votes, expected", [
+    ((0, 0, 0), 0),      # nadie vota
+    ((1, 0, 0), 0),      # 1 a favor de largo: no abre
+    ((0, -1, 0), 0),     # 1 a favor de corto: no abre
+    ((1, -1, 0), 0),     # 1 largo y 1 corto: no abre
+    ((1, 1, 0), 1),      # 2 de 3 largos: abre largo
+    ((1, 0, 1), 1),
+    ((1, 1, -1), 1),     # 2 largos contra 1 corto: abre largo
+    ((1, 1, 1), 1),      # 3 de 3
+    ((-1, -1, 0), -1),   # 2 de 3 cortos: abre corto
+    ((-1, 1, -1), -1),
+    ((-1, -1, -1), -1),
+])
+def test_confirmation_rule_two_of_three(votes, expected):
+    """Regla 2 de 3 sola, sin el filtro de ADX (confirmation_signal)."""
+    assert MIN_VOTES == 2
+    votes_df = pd.DataFrame([votes], columns=["vote_ema", "vote_roc", "vote_bb"])
+    assert confirmation_signal(votes_df).iloc[0] == expected
