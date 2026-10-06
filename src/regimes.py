@@ -43,7 +43,7 @@ MIN_DURATION = 12                       # pasos del HMM = horas
 HMM_SEEDS = range(10)
 TRANSMAT_PRIOR_WEIGHT = 50
 
-# Fechas de ajuste por defecto: las mismas de train en src/splits.py.
+# Fechas de ajuste por defecto: el periodo de train del proyecto.
 FIT_START = "2022-06-01"
 FIT_END = "2023-05-14"
 
@@ -556,6 +556,23 @@ def fit_regime_models(df: pd.DataFrame, fit_start: str = FIT_START,
                         kmeans, kmeans_names, hmm, hmm_names, hmm_choice)
 
 
+def rule_regimes(df: pd.DataFrame, fit_end: str) -> tuple[pd.Series, float]:
+    """Regimen por reglas con el umbral ajustado en ventana expansiva.
+
+    El umbral de crisis (p90 de la volatilidad) se ajusta con las barras hh:00
+    desde el inicio de df hasta fit_end. Con ese umbral se etiqueta todo df,
+    una vez por hora. Es causal: las features en t solo usan datos hasta t y
+    el umbral no ve nada posterior a fit_end.
+
+    Recibe los precios (columna "Close") y la ultima fecha del ajuste.
+    Regresa (etiqueta por barra de df, umbral de volatilidad usado).
+    """
+    features = hourly(regime_features(df))
+    vol_threshold = fit_rule_thresholds(features.loc[:fit_end])
+    labels = to_bars(classify_rules(features, vol_threshold), df.index)
+    return labels, vol_threshold
+
+
 def regime_labels(df: pd.DataFrame, models: RegimeModels) -> pd.DataFrame:
     """Etiquetas de regimen por barra con los modelos ya ajustados en train.
 
@@ -585,7 +602,7 @@ def regime_labels(df: pd.DataFrame, models: RegimeModels) -> pd.DataFrame:
 # hh:00, asi que persistencia y separacion se miden en pasos de una hora.
 
 METHODS = ["rules", "kmeans", "hmm"]
-# Periodos por defecto: train y test de src/splits.py.
+# Periodos por defecto: train y la primera parte de fuera de muestra del archivo de train.
 DEFAULT_PERIODS = {"train": (FIT_START, FIT_END), "test": ("2023-05-15", "2023-09-06")}
 HOURS_PER_MONTH = 24 * 30
 

@@ -1,9 +1,21 @@
 """Carga, validacion y auditoria de los datos de BTCUSDT de 5 minutos (Lab 02)."""
 
+from pathlib import Path
+
 import pandas as pd
 
 BAR_MINUTES = 5
 PRICE_COLUMNS = ["Open", "High", "Low", "Close"]
+
+# Archivos de datos, resueltos desde la raiz del repo.
+ROOT = Path(__file__).resolve().parents[1]
+TRAIN_PATH = str(ROOT / "data" / "btc_project_train.csv")
+TEST_PATH = str(ROOT / "data" / "btc_project_test.csv")
+
+# El archivo de test trae un dia suelto (2023-12-31) y despues un hueco de
+# 122 dias. Solo se evalua mayo-junio 2024.
+TEST_START = "2024-05-02"
+TEST_END = "2024-06-03"
 
 
 def load_btc(path: str) -> pd.DataFrame:
@@ -23,6 +35,21 @@ def load_btc(path: str) -> pd.DataFrame:
     df = df[on_grid].copy()
     df["Volume"] = df["Volume"].fillna(0.0)
     return df
+
+
+def load_train() -> pd.DataFrame:
+    """Carga el archivo de train completo (2022-06-01 a 2023-12-31), ya limpio."""
+    return load_btc(TRAIN_PATH)
+
+
+def load_test() -> pd.DataFrame:
+    """Carga el archivo de test completo, ya limpio.
+
+    Incluye el dia suelto 2023-12-31; para evaluar se recorta con
+    TEST_START y TEST_END. Se usa una sola vez, al final.
+    """
+    return load_btc(TEST_PATH)
+
 
 def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """Agrega barras de 5 minutos a un timeframe mayor (p. ej. "1h", "4h").

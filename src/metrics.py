@@ -7,12 +7,14 @@ de trades y no leen archivos. Convenciones:
 """
 
 import math
-from typing import Optional
+from dataclasses import replace
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
 
-from src.backtest import compute_win_rate
+from src.backtest import backtest, compute_win_rate, config_from_params
+from src.signals import compute_strategy
 
 BARS_PER_DAY = 288                      # 24 h x 12 barras de 5 minutos
 PERIODS_PER_YEAR = BARS_PER_DAY * 365
@@ -379,3 +381,58 @@ def summarize(equity_df: pd.DataFrame, trades: pd.DataFrame, config,
         "turnover_annual": turnover["turnover_annual"],
         "cost_hurdle_annual": turnover["cost_hurdle_annual"],
     })
+
+
+# ---------------------------------------------------------------------------
+# Robustez a costos de transaccion
+# ---------------------------------------------------------------------------
+
+def cost_sensitivity(df: pd.DataFrame, params: dict, periods: dict,
+                     round_trip_bps: Iterable[float] = range(0, 55, 5)) -> pd.DataFrame:
+    """Sharpe y equity final de la estrategia para varios costos de ida y vuelta.
+
+    La señal se calcula una vez con compute_strategy(df, params). Para cada
+    costo de ida y vuelta (en bps) se corre el backtest con comision por lado
+    = bps / 2 / 10_000 y slippage 0, y cada periodo se mide por separado con
+    summarize (equity rebasada al inicio del periodo). Sirve para dibujar la
+    curva de retorno neto contra nivel de costo.
+
+    Recibe las velas de 5 min, los parametros θ, los periodos
+    {nombre: (inicio, fin)} y la malla de costos en bps.
+    Regresa un DataFrame con indice bps y columnas sharpe_<periodo> y
+    equity_final_<periodo>.
+    """
+    features = compute_strategy(df, params)
+    base_config = config_from_params(params)
+
+    rows = []
+    for bps in round_trip_bps:
+        config = replace(base_config, commission_rate=bps / 2 / 10_000, slippage_rate=0.0)
+        result = backtest(df, features["signal"], features["atr"], config)
+        row = {"bps": bps}
+        for name, (start, end) in periods.items():
+            summary = summarize(result.equity, result.trades, config, start, end)
+            row[f"sharpe_{name}"] = summary["sharpe"]
+            row[f"equity_final_{name}"] = summary["equity_final"]
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("bps")
+
+
+def break_even_cost(bps: pd.Series, sharpe: pd.Series) -> float:
+    """Costo de ida y vuelta en el que el Sharpe cruza 0 por primera vez (break-even).
+
+    Interpola en linea recta entre los dos puntos de la malla donde el Sharpe
+    pasa de > 0 a <= 0:  bps* = b_0 + S_0 · (b_1 - b_0) / (S_0 - S_1).
+
+    Recibe los costos en bps (en orden creciente) y el Sharpe en cada costo.
+    Regresa el costo de break-even en bps; NaN si el Sharpe no cruza 0 en la
+    malla (siempre > 0, o ya <= 0 desde el primer punto).
+    """
+    b = np.asarray(bps, dtype=float)
+    s = np.asarray(sharpe, dtype=float)
+    if len(s) == 0 or not s[0] > 0:
+        return np.nan
+    for i in range(1, len(s)):
+        if s[i] <= 0:
+            return b[i - 1] + s[i - 1] * (b[i] - b[i - 1]) / (s[i - 1] - s[i])
+    return np.nan

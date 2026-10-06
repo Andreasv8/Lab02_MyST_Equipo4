@@ -11,7 +11,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from src.signals import compute_features
+from src.signals import THETA0, compute_strategy
 
 # Costos por lado (docs/SPEC.md, seccion 6): comision de 0.125% y slippage 0 en el
 # escenario base. El efecto de costos mas altos se mide con la curva de costos.
@@ -297,12 +297,14 @@ class BacktestResult:
 def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
              config: BacktestConfig, sl_mult: Optional[pd.Series] = None,
              tp_mult: Optional[pd.Series] = None,
-             max_holding: Optional[pd.Series] = None) -> BacktestResult:
+             max_holding: Optional[pd.Series] = None,
+             force_exit: Optional[pd.Series] = None) -> BacktestResult:
     """Simula la estrategia barra por barra con estado explicito de caja.
 
     Cada barra t se procesa en el orden de docs/SPEC.md, seccion 7:
 
     1. Open: si el open ya cruzo el SL/TP (gap), se cierra al open.
+    1b. Open: si force_exit de t-1 es True, se cierra al open ("regime_exit").
     2. Open: si la señal de t-1 es opuesta a la posicion, se cierra al open.
     3. Open: si no hay posicion y la señal de t-1 es != 0, se abre al open
        con el ATR de t-1 (sizing con V_t = cash, que estando flat es el
@@ -334,6 +336,11 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
         el regimen. Se fijan al ENTRAR con el valor de la barra de señal
         t-1 (igual que el ATR) y la posicion los conserva hasta salir.
         None = el escalar de config en todas las barras.
+    force_exit : pd.Series de bool, opcional
+        Salida forzada por barra (regla R3: el regimen cambia a crisis). Si es
+        True en t-1 y hay posicion, se cierra al open de t pagando comision;
+        igual que la señal, se decide en t-1 y se ejecuta en t (sin look-ahead).
+        None = nunca se fuerza la salida.
 
     Regresa
     -------
@@ -354,6 +361,13 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
     sl_vals = _per_bar(sl_mult, config.sl_mult, "sl_mult")
     tp_vals = _per_bar(tp_mult, config.tp_mult, "tp_mult")
     holding_vals = _per_bar(max_holding, config.max_holding, "max_holding")
+    # Salida forzada por barra; un NaN cuenta como "no forzar".
+    if force_exit is None:
+        exit_flags = np.zeros(len(df), dtype=bool)
+    elif not force_exit.index.equals(df.index):
+        raise ValueError("force_exit debe tener el mismo indice que df")
+    else:
+        exit_flags = force_exit.fillna(False).to_numpy(dtype=bool)
 
     sig = signal.to_numpy()
     atr_vals = atr.to_numpy(dtype=float)
@@ -459,6 +473,11 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
                 cash += _close(position, t, raw_exit, reason, "open")
                 position, shares = None, 0.0
 
+        # 1b. Salida forzada por regimen, decidida en t-1 (regla R3).
+        if position is not None and exit_flags[t - 1]:
+            cash += _close(position, t, opens[t], "regime_exit", "open")
+            position, shares = None, 0.0
+
         desired_side = int(sig[t - 1])
 
         # 2. Señal opuesta: se cierra al open.
@@ -498,37 +517,33 @@ def backtest(df: pd.DataFrame, signal: pd.Series, atr: pd.Series,
     return BacktestResult(equity=equity, trades=pd.DataFrame(trades, columns=TRADE_COLUMNS))
 
 
-def run_backtest(df: pd.DataFrame, capital: float = 1_000_000.0, rho: float = 0.01,
-                 sl_mult: float = 2.0, tp_mult: float = 3.0, max_holding: int = 10) -> list[dict]:
-    """Corre la estrategia completa (entry + exit + sizing) sobre df.
+def config_from_params(params: dict, capital: float = 1_000_000.0) -> BacktestConfig:
+    """Arma la configuracion del motor a partir de los parametros θ.
 
-    Calcula los indicadores y la señal con compute_features y delega la
-    simulacion en src.backtest.backtest, que es el unico motor (orden de
-    eventos de docs/SPEC.md, seccion 7; costos por defecto de la seccion 6).
-    Una posicion que sigue abierta al final de la serie no se registra.
-
-    Parametros
-    ----------
-    df : pd.DataFrame
-        Debe incluir columnas "Open", "High", "Low", "Close", "Volume" e
-        indice de fechas.
-    capital, rho, sl_mult, tp_mult, max_holding
-        Ver docs/SPEC.md, secciones 4 y 5.
-
-    Regresa
-    -------
-    list[dict]
-        Un registro por operacion cerrada, con entry_bar, exit_bar,
-        entry_date, exit_date, side, entry_price, exit_price, shares,
-        truncated, exit_reason, exit_phase ("open", "intrabar" o "close"),
-        borrow_fee y pnl. entry_price y exit_price ya incluyen el ajuste por
-        costos; pnl es neto de comision, slippage y borrow fee. Toda entrada
-        ocurre en el open de entry_bar.
+    El take-profit se mide en multiplos del stop: tp_mult = rr · sl_mult.
+    Recibe el diccionario θ (rho, sl_mult, rr, max_holding) y el capital inicial.
+    Regresa un BacktestConfig con los costos por defecto.
     """
-    features = compute_features(df)
-    config = BacktestConfig(initial_cash=capital, rho=rho, sl_mult=sl_mult,
-                            tp_mult=tp_mult, max_holding=max_holding)
-    result = backtest(df, features["signal"], features["atr_14"], config)
+    return BacktestConfig(initial_cash=capital, rho=params["rho"], sl_mult=params["sl_mult"],
+                          tp_mult=params["rr"] * params["sl_mult"],
+                          max_holding=int(params["max_holding"]))
+
+
+def run_backtest(df: pd.DataFrame, params: dict = THETA0,
+                 capital: float = 1_000_000.0) -> list[dict]:
+    """Corre la estrategia final completa (señal + salidas + sizing) sobre df.
+
+    Calcula la señal y el ATR de 4h con compute_strategy y simula con
+    backtest(), que es el unico motor (orden de eventos de docs/SPEC.md,
+    seccion 7). Una posicion que sigue abierta al final no se registra.
+
+    Recibe las velas de 5 min, los parametros θ y el capital inicial.
+    Regresa una lista con un diccionario por operacion cerrada (columnas de
+    TRADE_COLUMNS). pnl es neto de comision, slippage y borrow fee.
+    """
+    features = compute_strategy(df, params)
+    config = config_from_params(params, capital)
+    result = backtest(df, features["signal"], features["atr"], config)
     return result.trades.to_dict("records")
 
 
