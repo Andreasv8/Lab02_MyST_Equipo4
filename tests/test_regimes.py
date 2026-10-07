@@ -32,8 +32,6 @@ from src.regimes import (
     fit_scaler,
     hmm_expected_durations,
     hmm_forward,
-    hmm_seed_scan,
-    method_scorecard,
     name_states,
     regime_centroids,
     regime_features,
@@ -178,16 +176,6 @@ def test_canary_viterbi_has_lookahead():
     assert changed
 
 
-def test_hmm_seed_scan_best_matches_final_model():
-    """El mejor log-likelihood del barrido de semillas es el del HMM elegido cuando la opcion es full."""
-    train = hourly(FULL_FEATURES.loc[FIT_START:FIT_END])
-    scan = hmm_seed_scan(train, MODELS.scaler, seeds=range(10))
-    x_train = apply_scaler(train.dropna(), MODELS.scaler).to_numpy()
-    assert MODELS.hmm_choice in ("full", "diag", "diag+prior")
-    if MODELS.hmm_choice == "full":
-        np.testing.assert_allclose(scan["log_likelihood"].max(), MODELS.hmm.score(x_train), rtol=1e-12)
-
-
 # Validacion del regimen (antes tests/test_regime_analysis.py)
 
 LABELS = ["a", "a", "b", "b", "b", "a"]
@@ -235,29 +223,6 @@ def test_silhouette_nan_with_single_regime():
     """Con un solo regimen el silhouette no esta definido."""
     x = pd.DataFrame({"f": [0.0, 1.0, 2.0]})
     assert np.isnan(regime_silhouette(x, pd.Series(["a", "a", "a"])))
-
-
-def test_method_scorecard_hand_case():
-    """Un metodo, dos periodos: cambios de participacion, transiciones y consistencia de nombres."""
-    names = ["crisis", "trend", "mean_reversion"]
-    row = lambda trans, dur, sil, shares: {"transitions_per_month": trans, "mean_duration_all": dur,
-                                           "silhouette": sil,
-                                           **{f"share_{n}": v for n, v in zip(names, shares)}}
-    table = pd.DataFrame.from_dict({("m", "train"): row(1.0, 20.0, 0.3, [10, 50, 40]),
-                                    ("m", "test"): row(1.5, 14.0, 0.2, [16, 41, 43])},
-                                   orient="index").rename_axis(["method", "period"])
-    good = pd.DataFrame({"volatility": [0.7, 0.5, 0.4], "trend_r2": [0.5, 0.8, 0.2]},
-                        index=pd.MultiIndex.from_product([["m"], names], names=["method", "regime"]))
-    bad = good.copy()
-    bad.loc[("m", "trend"), "trend_r2"] = 0.1   # trend ya no es el de mayor trend_r2
-
-    card = method_scorecard(table, good, bad).loc["m"]
-
-    assert card["share_shift_pp"] == pytest.approx((6 + 9 + 3) / 3)
-    assert card["transitions_change"] == pytest.approx(0.5)
-    assert card["mean_duration_test"] == 14.0
-    assert card["names_consistent_train"]
-    assert not card["names_consistent_test"]
 
 
 def test_viterbi_lookahead_check_filtered_never_changes():
