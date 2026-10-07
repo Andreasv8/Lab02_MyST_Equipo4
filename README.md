@@ -123,6 +123,9 @@ Revisamos cada cambio antes de hacer commit, y las dos podemos explicar cualquie
 │   └── btc_project_test.csv
 ├── docs/
 │   ├── SPEC.md          (especificación y pre-registro)
+│   ├── presentacion.pdf (presentación)
+│   ├── reporte.md       (reporte ejecutivo)
+│   ├── reporte.pdf      (reporte ejecutivo en PDF)
 │   ├── figures/         (figuras que genera main.py)
 │   └── tables/          (tablas que genera main.py)
 ├── notebooks/
