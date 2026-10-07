@@ -7,7 +7,7 @@
 
 ## Nivel de alcance
 
-B (BTCUSDT 5 minutos, con detección de régimen).
+B (BTCUSDT 5 minutos - 4 hrs, con detección de régimen).
 
 ## Descripción
 
