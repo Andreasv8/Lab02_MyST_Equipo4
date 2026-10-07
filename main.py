@@ -37,8 +37,9 @@ from src.plots import (plot_correlation, plot_cost_curve, plot_drawdown, plot_fe
                        plot_portfolio, plot_portfolio_panels, plot_portfolio_regimes, plot_regime_timeline,
                        plot_returns_table,
                        plot_sensitivity)
-from src.regimes import (FIT_END, FIT_START, fit_regime_models, hourly,
-                         regime_features, regime_labels, regime_shares, regime_validation, rule_regimes)
+from src.regimes import (FIT_END, FIT_START, fit_regime_models, hmm_expected_durations, hourly,
+                         regime_centroids, regime_features, regime_labels, regime_shares, regime_validation,
+                         rule_regimes)
 from src.signals import compute_strategy, indicator_correlation
 
 ROOT = Path(__file__).resolve().parent
@@ -197,6 +198,21 @@ def robustness_correlation(df: pd.DataFrame, theta: dict) -> None:
     _save_figure(plot_correlation(corr_votes, corr_indicators), "correlation")
 
 
+def save_regime_tables(models, labels: pd.DataFrame, features: pd.DataFrame) -> None:
+    """Duraciones esperadas del HMM y centroides de cada regimen (por metodo y periodo).
+
+    Los centroides (media de cada variable por regimen, en unidades originales)
+    sirven para revisar que los nombres tienen sentido: crisis = mayor
+    volatilidad; trend = mayor trend_r2 entre los otros dos.
+    """
+    durations = hmm_expected_durations(models.hmm, models.hmm_names).rename("expected_duration_hours")
+    _save(durations.rename_axis("regime").to_frame(), "hmm_durations")
+    methods = ["rules", "kmeans", "hmm"]
+    centroids = {period: regime_centroids(labels.loc[start:end], features.loc[start:end], methods)
+                 for period, (start, end) in REGIME_PERIODS.items()}
+    _save(pd.concat(centroids, names=["period"]), "regime_centroids")
+
+
 def regime_outputs(df: pd.DataFrame, results: list[dict], curves: dict, inputs: dict) -> None:
     """Salidas de regimen del Nivel B: validacion, linea de tiempo, distribuciones y transiciones."""
     models = fit_regime_models(df, FIT_START, FIT_END)
@@ -204,6 +220,7 @@ def regime_outputs(df: pd.DataFrame, results: list[dict], curves: dict, inputs: 
 
     labels = hourly(regime_labels(df, models))
     features = hourly(regime_features(df))
+    save_regime_tables(models, labels, features)
     close = hourly(df["Close"].to_frame())["Close"]
     out_of_sample = pd.Timestamp(REGIME_PERIODS["fuera_de_muestra"][0])
     _save_figure(plot_regime_timeline(close, labels, out_of_sample), "regime_timeline")

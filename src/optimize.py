@@ -89,11 +89,6 @@ def make_windows(index: pd.DatetimeIndex, first_train_start: str = FIRST_TRAIN_S
     return windows
 
 
-def _between(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Barras con start <= t < end."""
-    return df[(df.index >= start) & (df.index < end)]
-
-
 # ---------------------------------------------------------------------------
 # 2. Optimizacion de una ventana (PDF 3.2)
 # ---------------------------------------------------------------------------
@@ -350,14 +345,6 @@ def run_oos(df: pd.DataFrame, inputs: pd.DataFrame, capital: float = CAPITAL,
                     sl_mult=inputs["sl_mult"], tp_mult=inputs["tp_mult"],
                     max_holding=inputs["max_holding"], force_exit=inputs["force_exit"],
                     rho=inputs["rho"])
-
-
-def run_oos_both(df: pd.DataFrame, results: list[dict], capital: float = CAPITAL) -> dict:
-    """Curva OOS con capa de regimen (θ*_regimen) y solo global (θ*), para compararlas."""
-    return {
-        "regimen": run_oos(df, build_oos_inputs(df, results, use_regimes=True), capital),
-        "global": run_oos(df, build_oos_inputs(df, results, use_regimes=False), capital),
-    }
 
 
 # ---------------------------------------------------------------------------

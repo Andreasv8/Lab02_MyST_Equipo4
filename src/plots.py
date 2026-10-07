@@ -6,8 +6,6 @@ ejes con nombre y leyenda (PDF 3.6). Convenciones: un eje y por grafica,
 colores fijos por curva y por regimen, rejilla tenue.
 """
 
-from typing import Optional
-
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
@@ -43,34 +41,6 @@ def _split_line(ax: plt.Axes, split_date: pd.Timestamp, label: str = "inicio de 
     y, offset = (1, -12) if at_top else (0, 6)
     ax.annotate(label, xy=(split_date, y), xycoords=("data", "axes fraction"),
                 xytext=(4, offset), textcoords="offset points", fontsize=9, color="#3d3c39")
-
-
-def plot_elbow(ax: plt.Axes, elbow: pd.Series, chosen_k: int = 3) -> plt.Axes:
-    """Curva del codo de K-means: inercia en train contra k, marcando el k elegido.
-
-    Parametros
-    ----------
-    ax : plt.Axes
-        Ejes donde dibujar.
-    elbow : pd.Series
-        Inercia indexada por k (salida de regimes.kmeans_elbow).
-    chosen_k : int
-        k usado en el lab (linea vertical).
-
-    Regresa
-    -------
-    plt.Axes
-    """
-    ax.plot(elbow.index, elbow.to_numpy(), color=STRATEGY_COLOR, marker="o", linewidth=2)
-    ax.axvline(chosen_k, color=REFERENCE_COLOR, linestyle="--", linewidth=1)
-    ax.annotate(f"k = {chosen_k}", xy=(chosen_k, 1), xycoords=("data", "axes fraction"),
-                xytext=(4, -12), textcoords="offset points", fontsize=9, color="#3d3c39")
-    ax.set_xticks(list(elbow.index))
-    ax.set_title("Curva del codo de K-means (train)")
-    ax.set_xlabel("Numero de clusters k")
-    ax.set_ylabel("Inercia (features escaladas)")
-    _style(ax)
-    return ax
 
 
 def _regime_line(ax: plt.Axes, close: pd.Series, labels: pd.Series) -> None:

@@ -7,15 +7,12 @@ de trades y no leen archivos. Convenciones:
 """
 
 import math
-from dataclasses import replace
-from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
 from scipy.stats import kruskal
 
-from src.backtest import backtest, compute_win_rate, config_from_params
-from src.signals import compute_strategy
+from src.backtest import compute_win_rate
 
 BARS_PER_DAY = 288                      # 24 h x 12 barras de 5 minutos
 PERIODS_PER_YEAR = BARS_PER_DAY * 365
@@ -151,126 +148,6 @@ def calmar_ratio(equity: pd.Series, periods: int = PERIODS_PER_YEAR) -> float:
     return cagr(equity, periods) / abs(mdd)
 
 
-def turnover_stats(equity: pd.Series, trades: pd.DataFrame, cost_rate: float,
-                   periods: int = PERIODS_PER_YEAR) -> dict:
-    """Rotacion anual y costo anual que la estrategia debe superar.
-
-    nocional = Σ raw_entry_price · shares (entradas) + Σ raw_exit_price · shares (salidas)
-    turnover_annual = nocional / media(E) / años
-    cost_hurdle_annual = turnover_annual · cost_rate + Σ borrow_fee / media(E) / años
-    trades_per_year = trades cerrados / años
-
-    Cada pata cuenta en el periodo de equity donde ocurre: la entrada si
-    entry_date cae en el rango de fechas de equity, y la salida (con su
-    borrow fee y el conteo del trade) si cae exit_date. Asi un trade que
-    cruza de un periodo a otro no se cuenta dos veces.
-
-    Parametros
-    ----------
-    equity : pd.Series
-        Equity por barra en dolares (sin rebasar), indice de fechas.
-    trades : pd.DataFrame
-        Trades de backtest() (usa raw_entry_price, raw_exit_price, shares,
-        borrow_fee, entry_date, exit_date).
-    cost_rate : float
-        Costo por lado como fraccion del nocional.
-    periods : int
-        Periodos por año.
-
-    Regresa
-    -------
-    dict
-        turnover_annual, cost_hurdle_annual, trades_per_year.
-    """
-    first, last = equity.index[0], equity.index[-1]
-    entries = trades[trades["entry_date"].between(first, last)]
-    exits = trades[trades["exit_date"].between(first, last)]
-
-    notional = ((entries["raw_entry_price"] * entries["shares"]).sum()
-                + (exits["raw_exit_price"] * exits["shares"]).sum())
-    mean_equity = equity.mean()
-    years = _years(equity, periods)
-
-    turnover_annual = notional / mean_equity / years
-    borrow_annual = exits["borrow_fee"].sum() / mean_equity / years
-    return {
-        "turnover_annual": turnover_annual,
-        "cost_hurdle_annual": turnover_annual * cost_rate + borrow_annual,
-        "trades_per_year": len(exits) / years,
-    }
-
-
-def win_rate_stats(trades: pd.DataFrame, sl_mult: float, tp_mult: float, cost_rate: float) -> dict:
-    """Win rate empirico vs break-even teorico, sin y con costos (docs/SPEC.md, break-even).
-
-    empirico = fraccion de trades con pnl neto > 0
-    r = tp_mult / sl_mult;  p* = 1 / (1 + r)
-    k_i = (cost_rate · Q · (P_e + P_x) + borrow_fee) / (sl_mult · ATR · Q),
-          con P_e, P_x precios crudos y ATR de la barra de señal
-    p*_costos = (1 + media(k)) / (1 + r)
-
-    Parametros
-    ----------
-    trades : pd.DataFrame
-        Trades de backtest().
-    sl_mult, tp_mult : float
-        Multiplos de ATR del stop-loss y del take-profit.
-    cost_rate : float
-        Costo por lado.
-
-    Regresa
-    -------
-    dict
-        win_rate, p_star, k_mean, p_star_cost (fracciones, no %). win_rate,
-        k_mean y p_star_cost son NaN si no hay trades.
-    """
-    r = tp_mult / sl_mult
-    p_star = 1 / (1 + r)
-    if trades.empty:
-        return {"win_rate": np.nan, "p_star": p_star, "k_mean": np.nan, "p_star_cost": np.nan}
-
-    round_trip_cost = (cost_rate * trades["shares"] * (trades["raw_entry_price"] + trades["raw_exit_price"])
-                       + trades["borrow_fee"])
-    risk = sl_mult * trades["entry_atr"] * trades["shares"]
-    k_mean = (round_trip_cost / risk).mean()
-    return {
-        "win_rate": compute_win_rate(trades.to_dict("records")) / 100,
-        "p_star": p_star,
-        "k_mean": k_mean,
-        "p_star_cost": (1 + k_mean) / (1 + r),
-    }
-
-
-def trade_stats(trades: pd.DataFrame) -> dict:
-    """Numero de trades, P&L promedio y profit factor.
-
-    profit_factor = Σ pnl de ganadores / |Σ pnl de perdedores|
-
-    Parametros
-    ----------
-    trades : pd.DataFrame
-        Trades de backtest() (usa pnl).
-
-    Regresa
-    -------
-    dict
-        n_trades, avg_pnl (NaN sin trades), profit_factor (inf si no hay
-        perdedores y si ganadores; NaN sin trades).
-    """
-    pnl = trades["pnl"]
-    gains = pnl[pnl > 0].sum()
-    losses = -pnl[pnl < 0].sum()
-    if losses > 0:
-        profit_factor = gains / losses
-    else:
-        profit_factor = np.inf if gains > 0 else np.nan
-    return {
-        "n_trades": len(trades),
-        "avg_pnl": pnl.mean() if len(pnl) else np.nan,
-        "profit_factor": profit_factor,
-    }
-
-
 def exposure(equity_df: pd.DataFrame) -> float:
     """Fraccion de barras con posicion abierta al cierre (shares != 0).
 
@@ -322,68 +199,6 @@ def buy_and_hold_equity(df: pd.DataFrame, initial_cash: float, cost_rate: float)
     }, index=df.index)
 
 
-def summarize(equity_df: pd.DataFrame, trades: pd.DataFrame, config,
-              start: Optional[str] = None, end: Optional[str] = None) -> pd.Series:
-    """Resumen de metricas de un periodo (completo o sub-periodo).
-
-    Recorta equity_df a [start, end] y rebasa la equity a config.initial_cash
-    en la primera barra del periodo (E / E_0 · initial_cash), para comparar
-    train y test por separado. Las metricas de razon (Sharpe, DD, CAGR, ...)
-    no cambian con el rebase. Los trades del periodo para win rate, profit
-    factor y P&L son los que cierran en el periodo (exit_date); en turnover,
-    cada pata cuenta en su propio periodo (ver turnover_stats).
-
-    Parametros
-    ----------
-    equity_df : pd.DataFrame
-        Salida equity de backtest() o de buy_and_hold_equity().
-    trades : pd.DataFrame
-        Trades de backtest() (puede estar vacio, p. ej. para buy & hold).
-    config : BacktestConfig
-        Usa initial_cash, sl_mult, tp_mult y cost_rate.
-    start, end : str, opcional
-        Limites del periodo (inclusive). None = desde el inicio / hasta el final.
-
-    Regresa
-    -------
-    pd.Series
-        equity_final, total_return, cagr, sharpe, sortino, max_drawdown,
-        calmar, n_trades, trades_per_year, avg_pnl, profit_factor, win_rate,
-        p_star, p_star_cost, k_mean, exposure, turnover_annual,
-        cost_hurdle_annual.
-    """
-    period = equity_df.loc[start:end]
-    equity = period["equity"]
-    rebased = equity / equity.iloc[0] * config.initial_cash
-    r = returns(rebased)
-
-    period_trades = trades[trades["exit_date"].between(equity.index[0], equity.index[-1])]
-    win = win_rate_stats(period_trades, config.sl_mult, config.tp_mult, config.cost_rate)
-    turnover = turnover_stats(equity, trades, config.cost_rate)
-    stats = trade_stats(period_trades)
-
-    return pd.Series({
-        "equity_final": rebased.iloc[-1],
-        "total_return": rebased.iloc[-1] / rebased.iloc[0] - 1,
-        "cagr": cagr(rebased),
-        "sharpe": sharpe_ratio(r),
-        "sortino": sortino_ratio(r),
-        "max_drawdown": max_drawdown(rebased),
-        "calmar": calmar_ratio(rebased),
-        "n_trades": stats["n_trades"],
-        "trades_per_year": turnover["trades_per_year"],
-        "avg_pnl": stats["avg_pnl"],
-        "profit_factor": stats["profit_factor"],
-        "win_rate": win["win_rate"],
-        "p_star": win["p_star"],
-        "p_star_cost": win["p_star_cost"],
-        "k_mean": win["k_mean"],
-        "exposure": exposure(period),
-        "turnover_annual": turnover["turnover_annual"],
-        "cost_hurdle_annual": turnover["cost_hurdle_annual"],
-    })
-
-
 # ---------------------------------------------------------------------------
 # Resumen de desempeño y tabla de retornos (PDF 3.2)
 # ---------------------------------------------------------------------------
@@ -431,36 +246,6 @@ def returns_table(equity: pd.Series, freq: str) -> pd.Series:
 # ---------------------------------------------------------------------------
 # Robustez a costos de transaccion
 # ---------------------------------------------------------------------------
-
-def cost_sensitivity(df: pd.DataFrame, params: dict, periods: dict,
-                     round_trip_bps: Iterable[float] = range(0, 55, 5)) -> pd.DataFrame:
-    """Sharpe y equity final de la estrategia para varios costos de ida y vuelta.
-
-    La señal se calcula una vez con compute_strategy(df, params). Para cada
-    costo de ida y vuelta (en bps) se corre el backtest con comision por lado
-    = bps / 2 / 10_000 y slippage 0, y cada periodo se mide por separado con
-    summarize (equity rebasada al inicio del periodo). Sirve para dibujar la
-    curva de retorno neto contra nivel de costo.
-
-    Recibe las velas de 5 min, los parametros θ, los periodos
-    {nombre: (inicio, fin)} y la malla de costos en bps.
-    Regresa un DataFrame con indice bps y columnas sharpe_<periodo> y
-    equity_final_<periodo>.
-    """
-    features = compute_strategy(df, params)
-    base_config = config_from_params(params)
-
-    rows = []
-    for bps in round_trip_bps:
-        config = replace(base_config, commission_rate=bps / 2 / 10_000, slippage_rate=0.0)
-        result = backtest(df, features["signal"], features["atr"], config)
-        row = {"bps": bps}
-        for name, (start, end) in periods.items():
-            summary = summarize(result.equity, result.trades, config, start, end)
-            row[f"sharpe_{name}"] = summary["sharpe"]
-            row[f"equity_final_{name}"] = summary["equity_final"]
-        rows.append(row)
-    return pd.DataFrame(rows).set_index("bps")
 
 
 def break_even_cost(bps: pd.Series, sharpe: pd.Series) -> float:

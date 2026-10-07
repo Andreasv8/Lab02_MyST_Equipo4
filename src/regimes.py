@@ -315,19 +315,6 @@ def classify_kmeans(features: pd.DataFrame, scaler: RegimeScaler, model: KMeans,
     return _to_labels(features, x.index, ids, names)
 
 
-def kmeans_elbow(features_train: pd.DataFrame, scaler: RegimeScaler,
-                 k_values=range(1, 9)) -> pd.Series:
-    """Curva del codo: inercia (suma de distancias cuadradas al centroide) en train por k.
-
-    Regresa
-    -------
-    pd.Series
-        Inercia indexada por k.
-    """
-    x = _valid_scaled(features_train, scaler).to_numpy()
-    return pd.Series({k: _kmeans(k, SEED).fit(x).inertia_ for k in k_values}, name="inertia")
-
-
 # ---------------------------------------------------------------------------
 # 3. HMM
 # ---------------------------------------------------------------------------
@@ -407,42 +394,6 @@ def fit_hmm(features_train: pd.DataFrame,
         model, choice = _fit_hmm_best_seed(x_train, "diag", prior), "diag+prior"
 
     return model, name_states(_unscale(model.means_, scaler)), choice
-
-
-def hmm_seed_scan(features_train: pd.DataFrame, scaler: RegimeScaler, seeds,
-                  covariance_type: str = "full") -> pd.DataFrame:
-    """Ajusta el HMM con cada semilla y resume log-likelihood y persistencia en train.
-
-    Sirve para documentar la seleccion de fit_hmm: EM llega a optimos locales
-    distintos segun la semilla; algunos tienen estados de ~1 barra (ruido).
-
-    Parametros
-    ----------
-    features_train : pd.DataFrame
-        Features de train.
-    scaler : RegimeScaler
-        Ajustado en train.
-    seeds : iterable de int
-        Semillas a probar.
-    covariance_type : str
-        "full" o "diag".
-
-    Regresa
-    -------
-    pd.DataFrame
-        Indice = semilla; columnas log_likelihood, a_11, a_22, a_33 (diagonal de
-        A en el orden de IDs del modelo) y min_duration = min_j 1/(1 - a_jj).
-    """
-    x_train = _valid_scaled(features_train, scaler).to_numpy()
-    rows = {}
-    for seed in seeds:
-        model = GaussianHMM(n_components=N_REGIMES, covariance_type=covariance_type,
-                            n_iter=200, random_state=seed).fit(x_train)
-        stay = np.diag(model.transmat_)
-        rows[seed] = {"log_likelihood": model.score(x_train),
-                      **{f"a_{j + 1}{j + 1}": stay[j] for j in range(N_REGIMES)},
-                      "min_duration": (1 / (1 - stay)).min()}
-    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("seed")
 
 
 def hmm_forward(model: GaussianHMM, x: np.ndarray) -> np.ndarray:
@@ -718,33 +669,6 @@ def comparison_table(labels_df: pd.DataFrame, features: pd.DataFrame, scaler: Re
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis(["method", "period"])
 
 
-def hmm_diagnostics(labels_df: pd.DataFrame, model: GaussianHMM, names: dict[int, str],
-                    periods: dict = DEFAULT_PERIODS) -> tuple[pd.DataFrame, pd.Series]:
-    """Diagnosticos exclusivos del HMM.
-
-    1. Por regimen: duracion esperada del modelo, 1 / (1 - a_jj), contra la
-       duracion media observada de las rachas filtradas en cada periodo
-       (ambas en horas: se usan las barras hh:00).
-       Si la observada es mucho menor, el forward cambia de estado mas
-       seguido de lo que la matriz A sugiere.
-    2. Por periodo: % de barras donde la etiqueta filtrada coincide con
-       Viterbi (que usa el futuro).
-
-    Regresa
-    -------
-    tuple[pd.DataFrame, pd.Series]
-        (duraciones por regimen, % de acuerdo filtrado == Viterbi por periodo).
-    """
-    durations = pd.DataFrame({"expected": hmm_expected_durations(model, names)})
-    agreement = {}
-    for period, (start, end) in periods.items():
-        sub = hourly(labels_df).loc[start:end, ["hmm", "hmm_viterbi"]].dropna()
-        runs = regime_runs(sub["hmm"])
-        durations[f"observed_{period}"] = pd.Series({n: np.mean(r) for n, r in runs.items()})
-        agreement[period] = (sub["hmm"] == sub["hmm_viterbi"]).mean() * 100
-    return durations.reindex(REGIME_NAMES), pd.Series(agreement, name="filtered_eq_viterbi_pct")
-
-
 def regime_centroids(labels_df: pd.DataFrame, features: pd.DataFrame,
                      methods: Optional[list[str]] = None) -> pd.DataFrame:
     """Media de cada feature por regimen, en unidades ORIGINALES, por metodo.
@@ -769,38 +693,6 @@ def regime_centroids(labels_df: pd.DataFrame, features: pd.DataFrame,
     methods = list(labels_df.columns) if methods is None else methods
     tables = {m: features.groupby(labels_df[m]).mean() for m in methods}
     return pd.concat(tables, names=["method", "regime"])
-
-
-def regime_return_profile(df: pd.DataFrame, labels_df: pd.DataFrame,
-                          periods: dict = DEFAULT_PERIODS) -> pd.DataFrame:
-    """Rendimiento y volatilidad anualizados de BTC por regimen (descriptivo).
-
-    A la etiqueta de t se le asocia el rendimiento simple de la barra siguiente,
-    R_{t+1} = Close_{t+1} / Close_t - 1: lo que se gana DESPUES de conocer el
-    regimen, y no el rendimiento que ya entro en las features de t.
-    ann_return = media(R) * PERIODS_PER_YEAR; ann_volatility = std(R) * sqrt(PERIODS_PER_YEAR).
-    La ultima barra no tiene t+1 y se excluye. No se usa para ajustar nada:
-    solo muestra si los regimenes son economicamente distintos.
-
-    Regresa
-    -------
-    pd.DataFrame
-        Indice (method, period, regime); columnas n_bars, ann_return, ann_volatility.
-    """
-    next_return = df["Close"].shift(-1) / df["Close"] - 1
-    rows = {}
-    for method in METHODS:
-        for period, (start, end) in periods.items():
-            data = pd.DataFrame({"label": labels_df.loc[start:end, method],
-                                 "ret": next_return.loc[start:end]}).dropna()
-            for name in REGIME_NAMES:
-                r = data.loc[data["label"] == name, "ret"]
-                rows[(method, period, name)] = {
-                    "n_bars": len(r),
-                    "ann_return": r.mean() * PERIODS_PER_YEAR,
-                    "ann_volatility": r.std() * np.sqrt(PERIODS_PER_YEAR),
-                }
-    return pd.DataFrame.from_dict(rows, orient="index").rename_axis(["method", "period", "regime"])
 
 
 def viterbi_lookahead_check(df: pd.DataFrame, models: RegimeModels, step: int = 5) -> pd.DataFrame:
@@ -841,59 +733,6 @@ def viterbi_lookahead_check(df: pd.DataFrame, models: RegimeModels, step: int = 
             "hmm_viterbi_same": models.hmm.predict(x_np[:k + 1])[-1] == full_viterbi[k],
         }
     return pd.DataFrame.from_dict(rows, orient="index")
-
-
-def _names_consistent(centroids: pd.DataFrame) -> bool:
-    """True si name_states sobre estos centroides reproduce los nombres que ya tienen."""
-    ordered = centroids.reindex(REGIME_NAMES).reset_index(drop=True)
-    if ordered[["volatility", "trend_r2"]].isna().any().any():
-        return False
-    mapping = name_states(ordered)
-    return all(mapping[i] == name for i, name in enumerate(REGIME_NAMES))
-
-
-def method_scorecard(table: pd.DataFrame, centroids_train: pd.DataFrame,
-                     centroids_test: pd.DataFrame) -> pd.DataFrame:
-    """Criterios numericos para elegir metodo de regimen, por metodo.
-
-    - persistencia: transiciones/mes y duracion media de rachas en test
-      (menos cambios = menos costos de rotacion y regimenes utilizables).
-    - estabilidad train -> test: cambio medio absoluto de participacion por
-      regimen (puntos porcentuales) y cambio de transiciones/mes.
-    - separacion: silhouette en train y test.
-    - consistencia interna: la regla de nombres (mayor volatilidad = crisis;
-      de los otros, mayor trend_r2 = trend) sigue valiendo con los centroides
-      de train y de test.
-    La causalidad no aparece: las tres etiquetas filtradas son causales
-    (tests de truncamiento).
-
-    Parametros
-    ----------
-    table : pd.DataFrame
-        Salida de comparison_table (indice method, period).
-    centroids_train, centroids_test : pd.DataFrame
-        Salida de regime_centroids en cada periodo (indice method, regime).
-
-    Regresa
-    -------
-    pd.DataFrame
-        Una fila por metodo.
-    """
-    rows = {}
-    share_cols = [f"share_{n}" for n in REGIME_NAMES]
-    for method in table.index.get_level_values("method").unique():
-        train, test = table.loc[(method, "train")], table.loc[(method, "test")]
-        rows[method] = {
-            "transitions_per_month_test": test["transitions_per_month"],
-            "mean_duration_test": test["mean_duration_all"],
-            "share_shift_pp": (test[share_cols] - train[share_cols]).abs().mean(),
-            "transitions_change": test["transitions_per_month"] - train["transitions_per_month"],
-            "silhouette_train": train["silhouette"],
-            "silhouette_test": test["silhouette"],
-            "names_consistent_train": _names_consistent(centroids_train.loc[method]),
-            "names_consistent_test": _names_consistent(centroids_test.loc[method]),
-        }
-    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("method")
 
 
 # Objetivo del PDF (seccion 3.4): regimenes separados (silhouette > 0.4).

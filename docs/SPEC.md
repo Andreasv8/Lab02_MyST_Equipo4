@@ -93,7 +93,7 @@ unidades se recortan a lo que alcanza con el capital (`compute_sizing` en `src/b
 
 - **Comisión:** 0.125% por lado, en cada apertura y en cada cierre, sobre el nocional (precio · unidades).
 - **Slippage:** 0 en el escenario base. El efecto de costos más altos se mide con la curva de retorno
-  neto contra nivel de costo (`cost_sensitivity` en `src/metrics.py`).
+  neto contra nivel de costo (`oos_cost_curve` en `src/optimize.py`).
 - **Borrow fee:** 0 (no se cobra por los cortos).
 
 Cada trade guarda `entry_commission` y `exit_commission` en dólares (y `entry_slippage`,
@@ -286,11 +286,24 @@ Definidos antes de ver resultados:
    OOS del walk-forward. Se usan **exactamente las mismas entradas por barra** de la curva OOS (señal,
    ATR, sl, tp, holding, rho y force_exit) y solo cambia la comisión por lado. No se vuelve a optimizar
    ni se recalcula la señal. Se reporta el **break-even** (costo donde el retorno llega a 0) y el margen
-   contra el costo real de 0.125% por lado. En el código será una función nueva (`oos_cost_curve`);
-   `cost_sensitivity` se queda para un solo θ.
+   contra el costo real de 0.125% por lado. En el código es la función `oos_cost_curve` (`src/optimize.py`).
 3. **Un indicador contra 2 de 3:** con θ_final en train, se corre la estrategia con un solo voto (EMA
    sola, ROC sola, Bollinger sola) y con la regla 2 de 3. Se reporta el número de operaciones y el Calmar.
 4. **Métricas por régimen** sobre las operaciones OOS, agrupadas por el régimen en la entrada: número
    de trades, win rate, retorno promedio por trade con intervalo bootstrap del 95% (semilla 42) y prueba
    de Kruskal-Wallis para ver si los retornos difieren entre regímenes.
 5. **Correlación entre los tres votos** y entre los indicadores, en velas de 4h, solo con datos de train.
+
+## 15. Resultados
+
+- **Walk-forward OOS en train** (2022-08-01 a 2023-12-25, 73 ventanas, 29,200 configuraciones): con
+  régimen −33.7% (162 trades), solo global −9.7% (137 trades); buy & hold +84.5%.
+- **Degradación:** +1.76% por semana en train contra −0.53% (con régimen) y −0.12% (solo global) fuera
+  de muestra; no sobrevive nada de la ventaja.
+- **Robustez:** la sensibilidad ±20% muestra un pico, no una meseta; la regla 2 de 3 no mejora a ROC
+  sola; break-even de costos de 5.6 pb por lado (solo global) contra 12.5 pb reales; con régimen pierde
+  incluso sin costos.
+- **Evaluación final en test** (2024-05-02 a 2024-06-03): con régimen +4.8% (8 trades), solo global
+  +1.7% (6 trades), buy & hold +16.4%. Es un mes y no alcanza para concluir ventaja.
+- La evaluación en test se corrió **una sola vez**: el código se subió en un commit (`a20df90`) antes de
+  la corrida (`269e2fc`) y no se cambió nada después de ver el resultado.
